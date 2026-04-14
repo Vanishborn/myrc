@@ -1,14 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-*.egg
+# Rust / Cargo
+/target/
+/dist/
 
-# Virtual environments
-.venv/
-venv/
+# Development reference (legacy scripts, planning docs, etc.)
+/dev/
 
 # IDE / editor
 .vscode/
@@ -20,13 +15,3 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
-
-# Testing / coverage
-.coverage
-htmlcov/
-.pytest_cache/
-.tox/
-
-# Packaging
-*.whl
-*.tar.gz
