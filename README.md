@@ -1,5 +1,7 @@
 # myrc
 
+[![DOI](https://zenodo.org/badge/1209739097.svg)](https://doi.org/10.5281/zenodo.19587073)
+
 A unified CLI for managing resources on University of Michigan HPC clusters.
 
 Successor to [slurm-usertools](https://bitbucket.org/umarcts/slurm-usertools). A single binary replaces the collection of Python, Perl, and shell scripts. Written in Rust.

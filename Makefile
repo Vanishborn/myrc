@@ -133,9 +133,10 @@ release: clean-dist
 		mkdir -p $$STAGING; \
 		cp target/$$BASE_TARGET/release/$(BINARY_NAME) $$STAGING/; \
 		if [ -f LICENSE ]; then cp LICENSE $$STAGING/; fi; \
+		xattr -cr $$STAGING 2>/dev/null || true; \
 		\
 		ARCHIVE=$(BINARY_NAME)_$(GIT_VERSION)_$${BASE_TARGET}.tar.gz; \
-		tar -czf $(DIST_DIR)/$$ARCHIVE -C $$STAGING .; \
+		COPYFILE_DISABLE=1 tar --no-xattrs -czf $(DIST_DIR)/$$ARCHIVE -C $$STAGING .; \
 		echo "  → $(DIST_DIR)/$$ARCHIVE"; \
 		rm -rf $$STAGING; \
 	done
