@@ -1,7 +1,7 @@
 # myrc Design Document
 
 > Authoritative architectural reference for the `myrc` CLI toolkit.
-> Current as of v0.2.0.
+> Current as of v0.3.0.
 > Covers naming, project structure, module contracts, concurrency patterns,
 > terminal aesthetics, dependencies, build, and deployment.
 > Consult this document before writing or reviewing any code.
@@ -337,14 +337,15 @@ Implemented via `colored::control::set_override(bool)` before command dispatch.
 
 Color is a signal, not decoration. Applied only to human output; JSON is never colored.
 
-| Context                | Rule                                                               | Function             |
-| ---------------------- | ------------------------------------------------------------------ | -------------------- |
-| Job state (any module) | COMPLETED→green, RUNNING→blue, PENDING→orange, FAILED/etc.→red     | `color_job_state()`  |
-| Efficiency (job stats) | ≥75%→green, ≥25%→orange, <25%→red                                  | `color_efficiency()` |
-| Exit code (job stats)  | `0` or `0:0`→green, anything else→red                              | `color_exit_code()`  |
-| Node state (sstate)    | IDLE→green, DOWN/NOT_RESPONDING→red, DRAIN/MAINTENANCE/etc.→orange | inline callback      |
-| Bottleneck (sstate)    | All avail=0 on available node→red avail cells                      | inline callback      |
-| Positive result        | "No maintenance window" → green                                    | `color_success()`    |
+| Context                | Rule                                                                   | Function             |
+| ---------------------- | ---------------------------------------------------------------------- | -------------------- |
+| Job state (any module) | COMPLETED→green, RUNNING→blue, PENDING/TIMEOUT→orange, FAILED/etc.→red | `color_job_state()`  |
+| Efficiency (job stats) | ≥75%→green, ≥25%→orange, <25%→red                                      | `color_efficiency()` |
+| Exit code (job stats)  | `0` or `0:0`→green, anything else→red                                  | `color_exit_code()`  |
+| Node state (sstate)    | IDLE→green, DOWN/NOT_RESPONDING→red, DRAIN/MAINTENANCE/etc.→orange     | inline callback      |
+| Bottleneck (sstate)    | All avail=0 on available node→red avail cells                          | inline callback      |
+| Positive result        | "No maintenance window" → green                                        | `color_success()`    |
+| Tips (job stats)       | Dim text for resource optimization suggestions                         | `color_dim()`        |
 
 Table coloring uses `Table::set_cell_color()`, a callback invoked with `(row_idx, col_idx, padded_str)` **after** padding. This preserves column alignment: ANSI escapes are injected around already-padded text, so `cell.len()` width calculations remain correct.
 
@@ -546,6 +547,7 @@ Queue wait time:     00:00:01
 Job start time:      04/13/2026 15:45:57
 Job end time:        04/13/2026 15:46:09
 Job running time:    00:00:12
+Walltime requested:  1-00:00:00
 
 State:               COMPLETED
 Exit code:           0
@@ -563,18 +565,26 @@ CPU Efficiency:      50.00% of 00:00:24 total CPU time (cores * walltime)
 
 Memory Utilized:     265.64 MiB
 Memory Efficiency:   44.27% of 600.00 MiB
+
+Max Disk Read:       1.12 GiB
+Max Disk Write:      0.54 GiB
 Cost:                $0.00
+
+TIP: Job used 265.64 MiB of 600.00 MiB memory. Consider requesting less.
 ```
 
 Fields sourced from `sacct --json` (Slurm 25+):
 
-| Field             | JSON path                            |
-| ----------------- | ------------------------------------ |
-| Submit command    | `submit_line`                        |
-| Queue wait        | `time.start` − `time.submission`     |
-| User/system CPU   | `time.user`, `time.system`           |
-| Stdout/stderr     | `stdout_expanded`, `stderr_expanded` |
-| Account/partition | `account`, `partition`               |
+| Field             | JSON path                                         |
+| ----------------- | ------------------------------------------------- |
+| Submit command    | `submit_line`                                     |
+| Queue wait        | `time.start` - `time.submission`                  |
+| User/system CPU   | `time.user`, `time.system`                        |
+| Walltime request  | `time.limit`                                      |
+| Max disk read     | `steps[].tres.requested.max` (type=fs, name=disk) |
+| Max disk write    | `steps[].tres.consumed.max` (type=fs, name=disk)  |
+| Stdout/stderr     | `stdout_expanded`, `stderr_expanded`              |
+| Account/partition | `account`, `partition`                            |
 
 ### 6.9 `modules setup`
 
@@ -630,7 +640,7 @@ Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`ta
 ```toml
 [package]
 name = "myrc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -778,10 +788,10 @@ Versions follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`):
 - `MINOR`: new subcommands, new flags, new JSON fields (backward-compatible)
 - `PATCH`: bug fixes, performance improvements, output formatting tweaks
 
-The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
+The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, `v0.3.0`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
 
 ```zsh
-myrc 0.2.0
+myrc 0.3.0
 Author: Haoran "Henry" Li @ University of Michigan
 Target: x86_64-unknown-linux-gnu
 ```

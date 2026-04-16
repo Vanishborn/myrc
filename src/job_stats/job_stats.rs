@@ -59,10 +59,13 @@ struct JobJson {
     queue_wait_seconds: u64,
     elapsed_seconds: u64,
     elapsed_slurm: String,
+    walltime_requested_seconds: u64,
     total_cpu_seconds: u64,
     user_cpu_seconds: u64,
     system_cpu_seconds: u64,
     max_rss_bytes: u64,
+    max_disk_read_bytes: u64,
+    max_disk_write_bytes: u64,
     billing: f64,
     tres_alloc: String,
     stdout_path: String,
@@ -112,6 +115,8 @@ struct JobData {
     user_cpu_secs: u64,
     system_cpu_secs: u64,
     max_rss_bytes: u64,
+    max_disk_read_bytes: u64,
+    max_disk_write_bytes: u64,
     billing: f64,
     tres_alloc: String,
     node_list: String,
@@ -334,7 +339,8 @@ fn parse_job_record(jv: &Value) -> Result<JobData> {
     // MaxRSS from steps
     let max_rss_bytes = parse_max_rss(jv);
 
-    // Billing value from TRES
+    let (max_disk_read_bytes, max_disk_write_bytes) = parse_disk_io(jv);
+
     let billing = parse_billing_from_tres(jv);
 
     // TRES allocation as formatted string
@@ -415,6 +421,8 @@ fn parse_job_record(jv: &Value) -> Result<JobData> {
         user_cpu_secs,
         system_cpu_secs,
         max_rss_bytes,
+        max_disk_read_bytes,
+        max_disk_write_bytes,
         billing,
         tres_alloc,
         node_list: s("nodes"),
@@ -622,6 +630,52 @@ fn parse_max_rss(jv: &Value) -> u64 {
     max_rss
 }
 
+fn parse_disk_io(jv: &Value) -> (u64, u64) {
+    let mut max_read: u64 = 0;
+    let mut max_write: u64 = 0;
+
+    if let Some(steps) = jv.get("steps").and_then(|v| v.as_array()) {
+        for step in steps {
+            if let Some(tres) = step.get("tres") {
+                if let Some(arr) = tres
+                    .get("requested")
+                    .and_then(|r| r.get("max"))
+                    .and_then(|m| m.as_array())
+                {
+                    for entry in arr {
+                        if entry.get("type").and_then(|v| v.as_str()) == Some("fs")
+                            && entry.get("name").and_then(|v| v.as_str()) == Some("disk")
+                        {
+                            let count = entry.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if count > max_read {
+                                max_read = count;
+                            }
+                        }
+                    }
+                }
+                if let Some(arr) = tres
+                    .get("consumed")
+                    .and_then(|r| r.get("max"))
+                    .and_then(|m| m.as_array())
+                {
+                    for entry in arr {
+                        if entry.get("type").and_then(|v| v.as_str()) == Some("fs")
+                            && entry.get("name").and_then(|v| v.as_str()) == Some("disk")
+                        {
+                            let count = entry.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if count > max_write {
+                                max_write = count;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (max_read, max_write)
+}
+
 /// Parse billing value from TRES in sacct JSON.
 fn parse_billing_from_tres(jv: &Value) -> f64 {
     // Try tres -> allocated -> billing
@@ -722,6 +776,13 @@ fn print_report(job: &JobData, auto_detected: bool) {
             "{:<20} {}",
             "Job running time:",
             format_duration_hms(job.elapsed_secs)
+        );
+    }
+    if is_terminal && job.walltime_requested_secs > 0 {
+        println!(
+            "{:<20} {}",
+            "Walltime requested:",
+            format_duration_hms(job.walltime_requested_secs)
         );
     }
 
@@ -843,10 +904,70 @@ fn print_report(job: &JobData, auto_detected: bool) {
             );
         }
 
+        if job.max_disk_read_bytes > 0 || job.max_disk_write_bytes > 0 {
+            println!();
+            if job.max_disk_read_bytes > 0 {
+                println!(
+                    "{:<20} {}",
+                    "Max Disk Read:",
+                    format_memory(job.max_disk_read_bytes)
+                );
+            }
+            if job.max_disk_write_bytes > 0 {
+                println!(
+                    "{:<20} {}",
+                    "Max Disk Write:",
+                    format_memory(job.max_disk_write_bytes)
+                );
+            }
+        }
+
         // Cost
         if job.cluster != "lighthouse" && job.billing > 0.0 {
             let cost = compute_cost(job.billing, job.elapsed_secs as f64 / 60.0, BILLING_DIVISOR);
             println!("{:<20} {}", "Cost:", format_dollars(cost).bold());
+        }
+
+        if matches!(job.state.as_str(), "COMPLETED" | "TIMEOUT") {
+            let mut tips: Vec<String> = Vec::new();
+
+            if job.req_mem_bytes > 0 && (mem_used as f64) < job.req_mem_bytes as f64 * 0.5 {
+                tips.push(format!(
+                    "TIP: Job used {} of {} memory. Consider requesting less.",
+                    format_memory(mem_used),
+                    format_memory(job.req_mem_bytes)
+                ));
+            }
+
+            if cpu_eff < 50.0 && job.alloc_cpus > 1 {
+                if job.job_name.starts_with("ondemand/") {
+                    tips.push(
+                        "TIP: Low CPU efficiency. Remember to delete your session when done to avoid idle charges.".to_string()
+                    );
+                } else {
+                    tips.push(format!(
+                        "TIP: CPU efficiency was {cpu_eff:.1}%. Consider requesting fewer cores."
+                    ));
+                }
+            }
+
+            if job.state != "TIMEOUT"
+                && job.walltime_requested_secs > 0
+                && job.elapsed_secs < job.walltime_requested_secs / 2
+            {
+                tips.push(format!(
+                    "TIP: Job ran {} of {} walltime. Consider requesting less.",
+                    format_duration_hms(job.elapsed_secs),
+                    format_duration_hms(job.walltime_requested_secs)
+                ));
+            }
+
+            if !tips.is_empty() {
+                println!();
+                for tip in &tips {
+                    println!("{}", color_dim(tip));
+                }
+            }
         }
     } else {
         // Pending/running: show requests
@@ -930,7 +1051,12 @@ fn print_json(job: &JobData, auto_detected: bool) {
         Some(EfficiencyJson {
             cpu_percent: (cpu_pct * 10.0).round() / 10.0,
             memory_percent: (mem_pct * 10.0).round() / 10.0,
-            walltime_utilized_percent: 100.0,
+            walltime_utilized_percent: if job.walltime_requested_secs > 0 {
+                ((job.elapsed_secs as f64 / job.walltime_requested_secs as f64) * 1000.0).round()
+                    / 10.0
+            } else {
+                0.0
+            },
         })
     } else {
         None
@@ -966,10 +1092,13 @@ fn print_json(job: &JobData, auto_detected: bool) {
             queue_wait_seconds: job.queue_wait_secs,
             elapsed_seconds: job.elapsed_secs,
             elapsed_slurm: format_duration_hms(job.elapsed_secs),
+            walltime_requested_seconds: job.walltime_requested_secs,
             total_cpu_seconds: job.total_cpu_secs,
             user_cpu_seconds: job.user_cpu_secs,
             system_cpu_seconds: job.system_cpu_secs,
             max_rss_bytes: job.max_rss_bytes,
+            max_disk_read_bytes: job.max_disk_read_bytes,
+            max_disk_write_bytes: job.max_disk_write_bytes,
             billing: job.billing,
             tres_alloc: job.tres_alloc.clone(),
             stdout_path: job.stdout_path.clone(),
@@ -1013,6 +1142,7 @@ fn resolve_path(work_dir: &str, script: &str) -> String {
     if script.starts_with('/') {
         script.to_string()
     } else {
+        let script = script.strip_prefix("./").unwrap_or(script);
         format!("{}/{}", work_dir.trim_end_matches('/'), script)
     }
 }
@@ -1058,6 +1188,10 @@ fn is_sbatch_value_flag(flag: &str) -> bool {
         "--array",
         "--begin",
         "--deadline",
+        "-D",
+        "--chdir",
+        "-M",
+        "--clusters",
     ];
     VALUE_FLAGS.contains(&flag)
 }
@@ -1372,6 +1506,22 @@ mod tests {
         assert_eq!(
             resolve_script_path("sbatch scripts/train.sh", "/home/user/projects"),
             Some("/home/user/projects/scripts/train.sh".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch ./Sbatch/run.sbatch", "/home/user/project"),
+            Some("/home/user/project/Sbatch/run.sbatch".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch ./run.sh", "/home/user"),
+            Some("/home/user/run.sh".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch -D /tmp/workdir --parsable -M armis2", "/home/user"),
+            None
+        );
+        assert_eq!(
+            resolve_script_path("sbatch -D /tmp/workdir run.sh", "/home/user"),
+            Some("/home/user/run.sh".to_string())
         );
     }
 }

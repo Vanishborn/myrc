@@ -96,8 +96,8 @@ pub fn color_job_state(s: &str) -> ColoredString {
     match s.trim() {
         "COMPLETED" => color_success(s),
         "RUNNING" => color_info(s),
-        "PENDING" => color_warning(s),
-        "FAILED" | "CANCELLED" | "TIMEOUT" | "OUT_OF_MEMORY" | "NODE_FAIL" => color_error(s),
+        "PENDING" | "TIMEOUT" => color_warning(s),
+        "FAILED" | "CANCELLED" | "OUT_OF_MEMORY" | "NODE_FAIL" => color_error(s),
         _ => s.normal(),
     }
 }
