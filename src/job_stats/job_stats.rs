@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use colored::Colorize;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::common::{
-    OutputMode, SpinnerGroup, SpinnerKind, color_dim, compute_cost, format_dollars, format_memory,
+    DIVIDER, OutputMode, SpinnerGroup, SpinnerKind, color_dim, color_error, color_info,
+    color_job_state, color_success, color_warning, compute_cost, format_dollars, format_memory,
     resolve_user, slurm_cmd,
 };
 
@@ -48,6 +50,9 @@ struct JobJson {
     req_mem_bytes: u64,
     req_mem_per_cpu: bool,
     submit_line: String,
+    working_directory: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_path: Option<String>,
     submit_time: String,
     start_time: String,
     end_time: String,
@@ -97,6 +102,7 @@ struct JobData {
     req_mem_bytes: u64,
     req_mem_per_cpu: bool,
     submit_line: String,
+    working_directory: String,
     submit_time: String,
     start_time: String,
     end_time: String,
@@ -368,6 +374,7 @@ fn parse_job_record(jv: &Value) -> Result<JobData> {
 
     // Submit line (sbatch command)
     let submit_line = s("submit_line");
+    let working_directory = s("working_directory");
 
     // Stdout/stderr expanded paths
     let stdout_path = s("stdout_expanded");
@@ -398,6 +405,7 @@ fn parse_job_record(jv: &Value) -> Result<JobData> {
         req_mem_bytes,
         req_mem_per_cpu,
         submit_line,
+        working_directory,
         submit_time: submit_epoch.map(format_epoch).unwrap_or_default(),
         start_time: start_epoch.map(format_epoch).unwrap_or_default(),
         end_time: end_epoch.map(format_epoch).unwrap_or_default(),
@@ -443,6 +451,27 @@ fn format_duration_hms(secs: u64) -> String {
         format!("{days}-{hours:02}:{mins:02}:{s:02}")
     } else {
         format!("{hours:02}:{mins:02}:{s:02}")
+    }
+}
+
+/// Color an efficiency percentage: green ≥75%, warning ≥25%, red <25%.
+fn color_efficiency(pct: f64) -> String {
+    let label = format!("{pct:.2}%");
+    if pct >= 75.0 {
+        color_success(&label).to_string()
+    } else if pct >= 25.0 {
+        color_warning(&label).to_string()
+    } else {
+        color_error(&label).to_string()
+    }
+}
+
+/// Color exit code: green for 0 or 0:0, red otherwise.
+fn color_exit_code(code: &str) -> String {
+    if code == "0" || code == "0:0" {
+        color_success(code).to_string()
+    } else {
+        color_error(code).to_string()
     }
 }
 
@@ -620,8 +649,6 @@ fn parse_billing_from_tres(jv: &Value) -> f64 {
 }
 
 fn print_report(job: &JobData, auto_detected: bool) {
-    let line = "--------------------------------------------------------------------------";
-
     if auto_detected {
         eprintln!(
             "{}",
@@ -630,16 +657,29 @@ fn print_report(job: &JobData, auto_detected: bool) {
     }
 
     println!(
-        "\nJob summary for JobID {} on the {} cluster for {}",
-        job.job_id, job.cluster, job.user
+        "{}{}{}{}{}{}",
+        "Job summary for JobID ".bold(),
+        color_info(&job.job_id).bold(),
+        " on the ".bold(),
+        color_info(&job.cluster).bold(),
+        " cluster for ".bold(),
+        color_info(&job.user).bold(),
     );
-    println!("Job name: {}", job.job_name);
-    println!("{line}");
+    println!("{}", format!("Job name: {}", job.job_name).bold());
+    println!("{DIVIDER}");
 
     // Submit command
     if !job.submit_line.is_empty() {
         println!("{:<20} {}", "Submit command:", job.submit_line);
     }
+    if !job.working_directory.is_empty() {
+        println!("{:<20} {}", "Working directory:", job.working_directory);
+    }
+    if let Some(path) = resolve_script_path(&job.submit_line, &job.working_directory) {
+        println!("{:<20} {}", "Script path:", path);
+    }
+
+    println!();
 
     // Times
     if !job.submit_time.is_empty() {
@@ -687,10 +727,10 @@ fn print_report(job: &JobData, auto_detected: bool) {
 
     // State + exit code + stdout/stderr
     if is_pending || job.state == "RUNNING" {
-        println!("\n{:<20} {}", "State:", job.state);
+        println!("\n{:<20} {}", "State:", color_job_state(&job.state));
     } else {
-        println!("\n{:<20} {}", "State:", job.state);
-        println!("{:<20} {}", "Exit code:", job.exit_code);
+        println!("\n{:<20} {}", "State:", color_job_state(&job.state));
+        println!("{:<20} {}", "Exit code:", color_exit_code(&job.exit_code));
     }
     if !job.stdout_path.is_empty() {
         println!("{:<20} {}", "Stdout:", job.stdout_path);
@@ -745,9 +785,9 @@ fn print_report(job: &JobData, auto_detected: bool) {
             );
         }
         println!(
-            "{:<20} {:.2}% of {} total CPU time (cores * walltime)",
+            "{:<20} {} of {} total CPU time (cores * walltime)",
             "CPU Efficiency:",
-            cpu_eff,
+            color_efficiency(cpu_eff),
             format_duration_hms(core_walltime as u64)
         );
 
@@ -773,9 +813,9 @@ fn print_report(job: &JobData, auto_detected: bool) {
 
         if ntasks == 1 {
             println!(
-                "{:<20} {:.2}% of {}",
+                "{:<20} {} of {}",
                 "Memory Efficiency:",
-                mem_eff,
+                color_efficiency(mem_eff),
                 format_memory(job.req_mem_bytes)
             );
         } else if job.req_mem_per_cpu {
@@ -785,9 +825,9 @@ fn print_report(job: &JobData, auto_detected: bool) {
                 job.req_mem_bytes
             };
             println!(
-                "{:<20} {:.2}% of {} ({}/core)",
+                "{:<20} {} of {} ({}/core)",
                 "Memory Efficiency:",
-                mem_eff,
+                color_efficiency(mem_eff),
                 format_memory(job.req_mem_bytes),
                 format_memory(per_cpu)
             );
@@ -795,9 +835,9 @@ fn print_report(job: &JobData, auto_detected: bool) {
             let nodes = if job.nodes == 0 { 1 } else { job.nodes };
             let per_node = job.req_mem_bytes / nodes as u64;
             println!(
-                "{:<20} {:.2}% of {} ({}/node)",
+                "{:<20} {} of {} ({}/node)",
                 "Memory Efficiency:",
-                mem_eff,
+                color_efficiency(mem_eff),
                 format_memory(job.req_mem_bytes),
                 format_memory(per_node)
             );
@@ -806,27 +846,36 @@ fn print_report(job: &JobData, auto_detected: bool) {
         // Cost
         if job.cluster != "lighthouse" && job.billing > 0.0 {
             let cost = compute_cost(job.billing, job.elapsed_secs as f64 / 60.0, BILLING_DIVISOR);
-            println!("{:<20} {}", "Cost:", format_dollars(cost));
+            println!("{:<20} {}", "Cost:", format_dollars(cost).bold());
         }
     } else {
         // Pending/running: show requests
         println!(
-            "\nWalltime request:    {}",
+            "\n{:<20} {}",
+            "Walltime request:",
             format_duration_hms(job.walltime_requested_secs)
         );
-        println!("Processors request:  {}", job.alloc_cpus);
-        println!("Memory request:      {}", format_memory(job.req_mem_bytes));
+        println!("{:<20} {}", "Processors request:", job.alloc_cpus);
+        println!(
+            "{:<20} {}",
+            "Memory request:",
+            format_memory(job.req_mem_bytes)
+        );
         if job.cluster != "lighthouse" && job.billing > 0.0 {
             let max_cost = compute_cost(
                 job.billing,
                 job.walltime_requested_secs as f64 / 60.0,
                 BILLING_DIVISOR,
             );
-            println!("Maximum job charge:  {}", format_dollars(max_cost));
+            println!(
+                "{:<20} {}",
+                "Maximum job charge:",
+                format_dollars(max_cost).bold()
+            );
         }
     }
 
-    println!("{line}\n");
+    println!("{DIVIDER}\n");
 }
 
 /// Format an RFC3339 or epoch timestamp for display (MM/DD/YYYY HH:MM:SS).
@@ -909,6 +958,8 @@ fn print_json(job: &JobData, auto_detected: bool) {
             req_mem_bytes: job.req_mem_bytes,
             req_mem_per_cpu: job.req_mem_per_cpu,
             submit_line: job.submit_line.clone(),
+            working_directory: job.working_directory.clone(),
+            script_path: resolve_script_path(&job.submit_line, &job.working_directory),
             submit_time: job.submit_time.clone(),
             start_time: job.start_time.clone(),
             end_time: job.end_time.clone(),
@@ -929,6 +980,86 @@ fn print_json(job: &JobData, auto_detected: bool) {
     };
 
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
+}
+
+/// Resolve the full script path from the sbatch submit line and working directory.
+fn resolve_script_path(submit_line: &str, work_dir: &str) -> Option<String> {
+    if submit_line.is_empty() || work_dir.is_empty() {
+        return None;
+    }
+
+    let mut args = submit_line.split_whitespace();
+    args.next(); // skip "sbatch" / "srun" / etc.
+
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return args.next().map(|script| resolve_path(work_dir, script));
+        }
+        if arg == "--wrap" || arg.starts_with("--wrap=") {
+            return None;
+        }
+        if arg.starts_with('-') {
+            if !arg.contains('=') && is_sbatch_value_flag(arg) {
+                args.next(); // skip the value
+            }
+            continue;
+        }
+        return Some(resolve_path(work_dir, arg));
+    }
+    None
+}
+
+fn resolve_path(work_dir: &str, script: &str) -> String {
+    if script.starts_with('/') {
+        script.to_string()
+    } else {
+        format!("{}/{}", work_dir.trim_end_matches('/'), script)
+    }
+}
+
+fn is_sbatch_value_flag(flag: &str) -> bool {
+    const VALUE_FLAGS: &[&str] = &[
+        "-A",
+        "--account",
+        "-p",
+        "--partition",
+        "-J",
+        "--job-name",
+        "-o",
+        "--output",
+        "-e",
+        "--error",
+        "-t",
+        "--time",
+        "-n",
+        "--ntasks",
+        "-c",
+        "--cpus-per-task",
+        "-N",
+        "--nodes",
+        "--mem",
+        "--mem-per-cpu",
+        "--mem-per-gpu",
+        "--gres",
+        "--gpus",
+        "--gpus-per-node",
+        "--gpus-per-task",
+        "-w",
+        "--nodelist",
+        "-x",
+        "--exclude",
+        "--qos",
+        "--constraint",
+        "-d",
+        "--dependency",
+        "--mail-type",
+        "--mail-user",
+        "--export",
+        "--array",
+        "--begin",
+        "--deadline",
+    ];
+    VALUE_FLAGS.contains(&flag)
 }
 
 #[cfg(test)]
@@ -1208,5 +1339,39 @@ mod tests {
         let job = parse_job_record(&jv).unwrap();
         assert_eq!(job.exit_code, "0:9");
         assert_eq!(job.state, "FAILED");
+    }
+
+    #[test]
+    fn test_resolve_script_path() {
+        assert_eq!(
+            resolve_script_path("sbatch train.sh", "/home/user"),
+            Some("/home/user/train.sh".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch /opt/train.sh", "/home/user"),
+            Some("/opt/train.sh".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch --account=myacct train.sh", "/home/user"),
+            Some("/home/user/train.sh".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch -A myacct -p gpu train.sh", "/home/user"),
+            Some("/home/user/train.sh".to_string())
+        );
+        assert_eq!(
+            resolve_script_path("sbatch --wrap=\"echo hello\"", "/home/user"),
+            None
+        );
+        assert_eq!(
+            resolve_script_path("sbatch -- train.sh", "/home/user"),
+            Some("/home/user/train.sh".to_string())
+        );
+        assert_eq!(resolve_script_path("", "/home/user"), None);
+        assert_eq!(resolve_script_path("sbatch train.sh", ""), None);
+        assert_eq!(
+            resolve_script_path("sbatch scripts/train.sh", "/home/user/projects"),
+            Some("/home/user/projects/scripts/train.sh".to_string())
+        );
     }
 }

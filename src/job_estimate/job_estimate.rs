@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use colored::Colorize;
 use serde::Serialize;
 use std::time::Duration;
 
 use crate::common::{
-    OutputMode, compute_cost, format_walltime_slurm, parse_memory, parse_walltime, slurm_cmd,
+    DIVIDER, OutputMode, compute_cost, format_dollars, format_walltime_slurm, parse_memory,
+    parse_walltime, slurm_cmd,
 };
 
 /// Estimate the dollar cost of a hypothetical job.
@@ -188,34 +190,32 @@ fn print_summary(args: &Args, mem_bytes: u64, duration: &Duration, cost: f64, to
     let secs = total_secs % 60;
     let mem_mib = mem_bytes as f64 / (1u64 << 20) as f64;
 
-    println!("--------------------------------------------------");
-    println!("Job Detail Summary:");
-    println!("--------------------------------------------------");
-    println!("Partition:     {}", args.partition);
-    println!("Total Nodes:   {}", args.nodes);
-    println!("Total Cores:   {}", args.cores);
-    println!("Total Memory:  {} MiB", mem_mib as u64);
+    println!("{}", "Job Cost Estimate".bold());
+    println!("{DIVIDER}");
+    println!("{:<20} {}", "Partition:", args.partition);
+    println!("{:<20} {}", "Total nodes:", args.nodes);
+    println!("{:<20} {}", "Total cores:", args.cores);
+    println!("{:<20} {} MiB", "Total memory:", mem_mib as u64);
     if args.gpus > 0 {
-        println!("Total GPUs:    {}", args.gpus);
+        println!("{:<20} {}", "Total GPUs:", args.gpus);
     }
     println!();
-    println!("Walltime:      {} day(s)", days);
-    println!("               {} hour(s)", hours);
-    println!("               {} minute(s)", mins);
-    println!("               {} second(s)", secs);
-    println!("--------------------------------------------------");
-    println!("Cost Estimate:");
-    println!("--------------------------------------------------");
-    let cost_rounded = format!("{:.2}", cost);
-    let cost_raw = format!("{}", cost);
+    println!("{:<20} {:<2} day(s)", "Walltime:", days);
+    println!("{:<20} {:<2} hour(s)", "", hours);
+    println!("{:<20} {:<2} minute(s)", "", mins);
+    println!("{:<20} {:<2} second(s)", "", secs);
+    println!();
     let total_hours = total_minutes / 60.0;
+    println!("{}", "Cost Estimate".bold());
     println!(
-        "Total:  ${cost_rounded} (${cost_raw}) for {} hours.",
-        total_hours
+        "{:<20} {} (${cost:.4}) for {total_hours:.4} hours",
+        "Total:",
+        format_dollars(cost).bold(),
     );
     println!();
     println!("NOTE: This price estimate assumes your job runs");
     println!("for the full walltime. Cost is subject to change.");
+    println!("{DIVIDER}");
 }
 
 fn print_json(

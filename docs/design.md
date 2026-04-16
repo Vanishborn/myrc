@@ -1,6 +1,7 @@
 # myrc Design Document
 
 > Authoritative architectural reference for the `myrc` CLI toolkit.
+> Current as of v0.2.0.
 > Covers naming, project structure, module contracts, concurrency patterns,
 > terminal aesthetics, dependencies, build, and deployment.
 > Consult this document before writing or reviewing any code.
@@ -138,6 +139,8 @@ Responsibilities:
 struct Cli {
     #[arg(long, global = true)]
     json: bool,
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto, global = true)]
+    color: ColorMode,
     #[arg(short = 'v', long = "verbose", action = Count, global = true)]
     verbose: u8,
     #[command(subcommand)]
@@ -230,24 +233,26 @@ On timeout, the child process is killed and `MyrcError::SlurmCmd` is returned wi
 
 | Component           | Description                                                                        |
 | ------------------- | ---------------------------------------------------------------------------------- |
-| `format_dollars()`  | `f64` → `"$1,234.56"` (2 decimals, thousands separator). See §5.6                  |
-| `format_percent()`  | `f64` → `"87.3%"` (1 decimal). See §5.6                                            |
-| `format_memory()`   | Bytes → auto-scaled IEC unit: `"256 MiB"`, `"1.5 GiB"`, `"2.0 TiB"`. See §5.6      |
-| `format_walltime()` | `Duration` → `DD-HH:MM:SS` (Slurm) or `HHH:MM:SS` (human-readable). See §5.6       |
+| `format_dollars()`  | `f64` → `"$1,234.56"` (2 decimals, thousands separator). See §5.7                  |
+| `format_percent()`  | `f64` → `"87.3%"` (1 decimal). See §5.7                                            |
+| `format_memory()`   | Bytes → auto-scaled IEC unit: `"256 MiB"`, `"1.5 GiB"`, `"2.0 TiB"`. See §5.7      |
+| `format_walltime()` | `Duration` → `DD-HH:MM:SS` (Slurm) or `HHH:MM:SS` (human-readable). See §5.7       |
 | `Table`             | Aligned column output. Adapts to terminal width. Right-aligns numbers, left-aligns |
-|                     | strings. Bold headers. Optional totals row with divider. See §5.6                  |
+|                     | strings. Bold headers. Optional totals row with divider. Optional per-cell color   |
+|                     | callback (`CellColorFn`) applied after padding to preserve alignment. See §5.7     |
 | `TerminalInfo`      | Terminal width detection via `terminal_size`. `is_narrow()` → < 105 columns        |
 
 ### 4.6 Environment & Output Control
 
-| Component          | Description                                                                                                                                                  |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ClusterEnv`       | Reads `$CLUSTER_NAME`, resolves epoch file paths via `$MYRC_ETC_DIR`. Cluster-specific feature flags                                                         |
-| `OutputMode`       | JSON vs table output, driven by `--json` global flag. Gates formatting calls                                                                                 |
-| `SpinnerGroup`     | Preconfigured `MultiProgress` with braille charset and staggered tick intervals (§5.3)                                                                       |
-| `confirm_prompt()` | `"message [y/N]: "` interactive prompt. Default-no. Returns `bool`. Skipped when `--yes` flag is set                                                         |
-| `ExitCode`         | Standard exit code enum: 0 success, 1 failure, 2 usage, 69 service unavailable, 78 config, 130 interrupted                                                   |
-| `MyrcError`        | Error enum via `thiserror`: SlurmCmd, Parse, Io, InvalidInput. Each variant maps to an `ExitCode` via `.exit_code()`. Propagate with `anyhow` + `.context()` |
+| Component          | Description                                                                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ClusterEnv`       | Reads `$CLUSTER_NAME`, resolves epoch file paths via `$MYRC_ETC_DIR`. Cluster-specific feature flags                                                           |
+| `OutputMode`       | JSON vs table output, driven by `--json` global flag. Gates formatting calls                                                                                   |
+| `ColorMode`        | `Auto`/`Always`/`Never`, driven by `--color` global flag. `Auto`: colored crate decides (TTY + `NO_COLOR`). `Always`/`Never`: `set_override()` before dispatch |
+| `SpinnerGroup`     | Preconfigured `MultiProgress` with braille charset and staggered tick intervals (§5.4)                                                                         |
+| `confirm_prompt()` | `"message [y/N]: "` interactive prompt. Default-no. Returns `bool`. Skipped when `--yes` flag is set                                                           |
+| `ExitCode`         | Standard exit code enum: 0 success, 1 failure, 2 usage, 69 service unavailable, 78 config, 130 interrupted                                                     |
+| `MyrcError`        | Error enum via `thiserror`: SlurmCmd, Parse, Io, InvalidInput. Each variant maps to an `ExitCode` via `.exit_code()`. Propagate with `anyhow` + `.context()`   |
 
 Parallel fanout pattern:
 
@@ -320,7 +325,30 @@ Designed for HPC cluster users who expect Unix-tool-level simplicity.
 
 Colors are suppressed when stdout is not a TTY (piped output) via the `colored` crate's auto-detection. Honor the `NO_COLOR` environment variable ([no-color.org](https://no-color.org/)). Use `std::io::IsTerminal` for TTY detection; `terminal_size` only for width measurement.
 
-### 5.3 Spinners and Progress
+The `--color=auto|always|never` global flag overrides auto-detection:
+
+- `auto` (default): `colored` crate decides with ON for TTY, OFF for pipe/redirect, OFF if `NO_COLOR=1`.
+- `always`: force color ON even through pipes (`myrc sstate --color=always | less -R`).
+- `never`: force color OFF on a TTY, per-invocation alternative to `NO_COLOR=1`.
+
+Implemented via `colored::control::set_override(bool)` before command dispatch.
+
+### 5.3 Semantic Data Coloring
+
+Color is a signal, not decoration. Applied only to human output; JSON is never colored.
+
+| Context                | Rule                                                               | Function             |
+| ---------------------- | ------------------------------------------------------------------ | -------------------- |
+| Job state (any module) | COMPLETED→green, RUNNING→blue, PENDING→orange, FAILED/etc.→red     | `color_job_state()`  |
+| Efficiency (job stats) | ≥75%→green, ≥25%→orange, <25%→red                                  | `color_efficiency()` |
+| Exit code (job stats)  | `0` or `0:0`→green, anything else→red                              | `color_exit_code()`  |
+| Node state (sstate)    | IDLE→green, DOWN/NOT_RESPONDING→red, DRAIN/MAINTENANCE/etc.→orange | inline callback      |
+| Bottleneck (sstate)    | All avail=0 on available node→red avail cells                      | inline callback      |
+| Positive result        | "No maintenance window" → green                                    | `color_success()`    |
+
+Table coloring uses `Table::set_cell_color()`, a callback invoked with `(row_idx, col_idx, padded_str)` **after** padding. This preserves column alignment: ANSI escapes are injected around already-padded text, so `cell.len()` width calculations remain correct.
+
+### 5.4 Spinners and Progress
 
 Used for subcommands with concurrent I/O where the user waits >1 second.
 
@@ -329,7 +357,7 @@ Used for subcommands with concurrent I/O where the user waits >1 second.
 **Template:**
 
 ```rs
-{spinner:.COLOR} {prefix:.bold.white:<12} {msg:.bold.COLOR:>6} {elapsed:.dim}
+{spinner:.COLOR} {prefix:.bold:<12} {msg:.bold.COLOR:>6} {elapsed:.dim}
 ```
 
 **Color-coded multi-spinners** (via `indicatif::MultiProgress`):
@@ -359,7 +387,7 @@ Spinners are cleared on completion; the final line shows count + unit:
 ⠸ Success:  12 months  3.2s
 ```
 
-### 5.4 Output Phases
+### 5.5 Output Phases
 
 Multi-step subcommands (e.g., `account usage`) separate phases with a leading `\n`:
 
@@ -378,13 +406,13 @@ Generating report...
 
 Single-step subcommands print results directly with no phase headers.
 
-### 5.5 `--json` Global Flag
+### 5.6 `--json` Global Flag
 
 When `--json` is passed, all human-readable formatting (colors, spinners, phase headers) is suppressed. Output is a single JSON object to stdout. Spinners and status messages go to stderr (if any).
 
 Per-module JSON schemas are defined alongside each module's implementation.
 
-### 5.6 Formatting Conventions
+### 5.7 Formatting Conventions
 
 Every number, unit, and table in the toolkit uses the same formatting rules.
 This is what makes `myrc` feel like one product.
@@ -409,6 +437,19 @@ This is what makes `myrc` feel like one product.
 - Totals row: preceded by a dash divider (`──────...`), totals in **bold**.
 - Adaptive width: when terminal < 105 columns, switch to key-value blocks (§1 `accounts` pattern). Modules that always produce narrow output skip this.
 - Empty results: dim message, exit 0. Example: `"No running jobs for account arc-ts.".dimmed()`
+
+**Report conventions (non-table key-value output):**
+
+- Shared divider: `DIVIDER` constant in `common.rs` with 72 Unicode `─` characters. Used by all report-style and table-header output.
+- Section titles: **bold** (via `colored`), followed by `DIVIDER` on next line.
+- Label alignment: `{:<20}` format specifier (20-char left-padded label column).
+- Continuation lines: 20-char indent (`{:<20}` with empty string) for multi-line values.
+- Closing divider: `DIVIDER` at end of report (after any trailing notes).
+- Walltime breakdown (job estimate): left-padded to 2 chars (`{:<2}`) so unit labels align vertically while the leading digit aligns with all other key-value pairs.
+- Cost values: **bold** in standalone key-value lines (via `.bold()` on `format_dollars()` result). Not colored. Bold inherits terminal foreground, safe on dark and light backgrounds.
+- Section separation: blank lines between logical groups (e.g., path fields → time fields, state → resources → efficiency).
+- Title line identifiers: key values (job_id, cluster, user, account) colored with `color_info().bold()` (blue + bold) to distinguish from surrounding bold text.
+- Exit code: `"0"` or `"0:0"` → green (`color_success`), all others → red (`color_error`).
 
 **Error display conventions:**
 
@@ -486,17 +527,20 @@ This is what makes `myrc` feel like one product.
 
 ### 6.8 `job stats`
 
-|             |                                                                                                    |
-| ----------- | -------------------------------------------------------------------------------------------------- |
-| **Command** | `myrc job stats [JOBID] [--raw]`                                                                   |
-| **Runtime** | tokio                                                                                              |
-| **Calls**   | `sacct` (auto-detect last job) + `sacct --json` (full record)                                      |
-| **Notes**   | Defaults to user's most recent job if JOBID omitted. `--raw` dumps JSON. CPU/mem efficiency + cost |
+|             |                                                                                                      |
+| ----------- | ---------------------------------------------------------------------------------------------------- |
+| **Command** | `myrc job stats [JOBID] [--raw]`                                                                     |
+| **Runtime** | tokio                                                                                                |
+| **Calls**   | `sacct` (auto-detect last job) + `sacct --json` (full record)                                        |
+| **Notes**   | Defaults to user's most recent job if JOBID omitted. `--raw` dumps JSON. CPU/mem efficiency + cost.  |
+|             | State and exit code are semantically colored (§5.3). Efficiency percentages color-coded by threshold |
 
 Human-readable report layout:
 
 ```txt
 Submit command:      sbatch scripts/run.sbatch
+Working directory:   /home/user/projects/ml-experiment
+Script path:         /home/user/projects/ml-experiment/scripts/run.sbatch
 Job submit time:     04/13/2026 15:45:56
 Queue wait time:     00:00:01
 Job start time:      04/13/2026 15:45:57
@@ -550,12 +594,13 @@ Fields sourced from `sacct --json` (Slurm 25+):
 
 ### 6.11 `sstate`
 
-|             |                                                                                             |
-| ----------- | ------------------------------------------------------------------------------------------- |
-| **Command** | `myrc sstate [-p PARTITION]`                                                                |
-| **Runtime** | tokio                                                                                       |
-| **Calls**   | `scontrol show node -o` or `sinfo -N ...`                                                   |
-| **Notes**   | Per-node resource dashboard: CPU/mem/GPU alloc + avail + percent + load + state. Totals row |
+|             |                                                                                                            |
+| ----------- | ---------------------------------------------------------------------------------------------------------- |
+| **Command** | `myrc sstate [-p PARTITION] [--raw]`                                                                       |
+| **Runtime** | tokio                                                                                                      |
+| **Calls**   | `scontrol show node -o` or `sinfo -N ...`                                                                  |
+| **Notes**   | Per-node resource dashboard: CPU/mem/GPU alloc + avail + percent + load + state. Totals row.               |
+|             | `--raw` disables bottleneck rule and state filtering. Node state and bottleneck avail cells colored (§5.3) |
 
 ---
 
@@ -585,7 +630,7 @@ Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`ta
 ```toml
 [package]
 name = "myrc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -733,10 +778,12 @@ Versions follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`):
 - `MINOR`: new subcommands, new flags, new JSON fields (backward-compatible)
 - `PATCH`: bug fixes, performance improvements, output formatting tweaks
 
-The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v1.0.0`, etc.) mark releases. `shadow-rs` embeds the git hash and build timestamp into `--version` so deployed binaries are always traceable:
+The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
 
 ```zsh
-myrc 0.1.0 (abc1234 2026-04-14T12:00:00Z)
+myrc 0.2.0
+Author: Haoran "Henry" Li @ University of Michigan
+Target: x86_64-unknown-linux-gnu
 ```
 
 #### Target Platforms

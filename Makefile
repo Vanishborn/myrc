@@ -113,18 +113,18 @@ endif
 # ───────────────────────────────────────────────────────────────────────
 
 release: clean-dist
-	@echo "═══════════════════════════════════════════════════════"
-	@echo "  Building $(BINARY_NAME) $(GIT_VERSION) for release"
-	@echo "═══════════════════════════════════════════════════════"
+	@echo "════════════════════════════════════════════════════════════════════════"
+	@echo "Building $(BINARY_NAME) $(GIT_VERSION) for release"
+	@echo "════════════════════════════════════════════════════════════════════════"
 	@command -v zig >/dev/null 2>&1 || { echo "Error: zig not found. Install with: brew install zig"; exit 1; }
 	@command -v cargo-zigbuild >/dev/null 2>&1 || { echo "Error: cargo-zigbuild not found. Install with: cargo install cargo-zigbuild"; exit 1; }
 	@mkdir -p $(DIST_DIR)
 
 	@for target in $(TARGETS); do \
 		echo ""; \
-		echo "──────────────────────────────────────────────────"; \
-		echo "  Building $$target"; \
-		echo "──────────────────────────────────────────────────"; \
+		echo "────────────────────────────────────────────────────────────────────────"; \
+		echo "Building $$target"; \
+		echo "────────────────────────────────────────────────────────────────────────"; \
 		BASE_TARGET=$$(echo $$target | sed 's/\.[0-9]*\.[0-9]*$$//'); \
 		rustup target add $$BASE_TARGET 2>/dev/null || true; \
 		cargo zigbuild $(RELEASE_FLAGS) --target $$target || exit 1; \
@@ -142,16 +142,16 @@ release: clean-dist
 	done
 
 	@echo ""
-	@echo "──────────────────────────────────────────────────────"
-	@echo "  Generating checksums"
-	@echo "──────────────────────────────────────────────────────"
+	@echo "────────────────────────────────────────────────────────────────────────"
+	@echo "Generating checksums"
+	@echo "────────────────────────────────────────────────────────────────────────"
 	@cd $(DIST_DIR) && (shasum -a 256 *.tar.gz 2>/dev/null || sha256sum *.tar.gz) > checksums.txt
 	@cat $(DIST_DIR)/checksums.txt
 
 	@echo ""
-	@echo "═══════════════════════════════════════════════════════"
-	@echo "  Release artifacts ready in $(DIST_DIR)/"
-	@echo "═══════════════════════════════════════════════════════"
+	@echo "════════════════════════════════════════════════════════════════════════"
+	@echo "Release artifacts ready in $(DIST_DIR)/"
+	@echo "════════════════════════════════════════════════════════════════════════"
 	@ls -lh $(DIST_DIR)/
 
 # Build a single target (usage: make release-target TARGET=x86_64-unknown-linux-gnu.2.17)

@@ -8,9 +8,9 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::common::{
-    Align, ClusterEnv, Column, FiscalYear, OutputMode, SpinnerGroup, SpinnerKind, Table,
-    billing_divisor, color_success, format_dollars, parse_slurm_kv, slurm_cmd, slurm_cmd_parallel,
-    validate_account,
+    Align, ClusterEnv, Column, DIVIDER, FiscalYear, OutputMode, SpinnerGroup, SpinnerKind, Table,
+    billing_divisor, color_info, color_success, format_dollars, parse_slurm_kv, slurm_cmd,
+    slurm_cmd_parallel, validate_account,
 };
 
 /// Arguments for `myrc account usage`.
@@ -353,15 +353,21 @@ pub async fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
 
     // Human-readable output
     // Header
-    println!("Account:     {}", args.account);
-    println!("Report Type: {tres_display}");
+    println!(
+        "{}{}",
+        "Account Usage: ".bold(),
+        color_info(&args.account).bold()
+    );
+    println!("{DIVIDER}");
+    println!("{:<20} {}", "Report type:", tres_display);
     if tres_display != "billing" {
-        println!("Units:       {tres_display}*hr");
+        println!("{:<20} {tres_display}*hr", "Units:");
     }
-    print!(" From {start_date} to {end_date}");
+    print!("{:<20} {} to {}", "Period:", start_date, end_date);
     if is_current_month {
         print!(
-            ", this month is an estimate as of {}",
+            "\n{:<20} This month is an estimate as of {}",
+            "",
             Local::now().format("%Y-%m-%d %H:%M:%S")
         );
     }
@@ -373,8 +379,8 @@ pub async fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
         println!(
             "{} has used approximately {} of an allowed {} limit this month",
             args.account,
-            format_dollars(used_this_month),
-            format_dollars(*limit_dollars)
+            format_dollars(used_this_month).bold(),
+            format_dollars(*limit_dollars).bold()
         );
     }
 

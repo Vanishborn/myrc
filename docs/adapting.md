@@ -132,3 +132,19 @@ For a minimal port, change these files:
 7. `src/account_usage/account_usage.rs`: Lighthouse TRES swap
 
 Everything else (table rendering, JSON output, concurrency, spinners, date validation) is institution-agnostic.
+
+---
+
+## 9. Color Palette
+
+The truecolor palette in `src/common/common.rs` is derived from the [U-M Brand Color Guidelines](https://brand.umich.edu/design-resources/colors/). If your institution has its own brand colors, update the RGB values in the five `color_*()` functions:
+
+| Function         | Role    | Default (U-M)                |
+| ---------------- | ------- | ---------------------------- |
+| `color_error()`  | Error   | `#c8352a` / red fallback     |
+| `color_warning()`| Warning | `#e27328` / yellow fallback  |
+| `color_success()`| Success | `#5ba84f` / green fallback   |
+| `color_info()`   | Info    | `#4f95c9` / cyan fallback    |
+| `color_dim()`    | Dim     | `#8e9094` / dimmed fallback  |
+
+The ANSI-16 fallbacks (used when `$COLORTERM` is not `truecolor`/`24bit`) are standard terminal colors and generally do not need changing. The `colored` crate respects `NO_COLOR` automatically.

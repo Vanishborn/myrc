@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn json_output_already_complete() {
         // Verify that already_complete is correct when all actions are AlreadyExists
-        let actions = vec![
+        let actions = [
             Action {
                 action: "create_dir",
                 path_display: "~/Lmod".into(),
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn json_output_not_already_complete() {
-        let actions = vec![
+        let actions = [
             Action {
                 action: "create_dir",
                 path_display: "~/Lmod".into(),

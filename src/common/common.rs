@@ -33,6 +33,10 @@ const BILLING_DIVISOR_NEW: u64 = 10_000_000;
 /// The cutoff date for the billing divisor change (2021-07-01).
 const BILLING_CUTOFF: (i32, u32, u32) = (2021, 7, 1);
 
+/// Standard report divider: 72 Unicode box-drawing characters.
+pub const DIVIDER: &str =
+    "────────────────────────────────────────────────────────────────────────";
+
 /// Whether the terminal advertises 24-bit truecolor support (checked once).
 static TRUECOLOR: LazyLock<bool> = LazyLock::new(|| {
     env::var("COLORTERM")
@@ -85,31 +89,41 @@ pub fn color_dim(s: &str) -> ColoredString {
     }
 }
 
-/// Returns the ANSI color name for spinner templates (not colorized strings).
-/// In truecolor mode, returns an RGB escape; in ANSI mode, returns the name.
-fn spinner_color_code(kind: SpinnerKind) -> String {
-    if *TRUECOLOR {
-        match kind {
-            SpinnerKind::Total => "79,149,201".to_string(), // Blue Bell
-            SpinnerKind::Success => "91,168,79".to_string(), // Medium Jungle
-            SpinnerKind::Failed => "200,53,42".to_string(), // Tomato Jam
-        }
-    } else {
-        match kind {
-            SpinnerKind::Total => "cyan".to_string(),
-            SpinnerKind::Success => "green".to_string(),
-            SpinnerKind::Failed => "red".to_string(),
-        }
+/// Color a string by Slurm job state semantics.
+///
+/// Matches on the trimmed value so padded table cells work correctly.
+pub fn color_job_state(s: &str) -> ColoredString {
+    match s.trim() {
+        "COMPLETED" => color_success(s),
+        "RUNNING" => color_info(s),
+        "PENDING" => color_warning(s),
+        "FAILED" | "CANCELLED" | "TIMEOUT" | "OUT_OF_MEMORY" | "NODE_FAIL" => color_error(s),
+        _ => s.normal(),
+    }
+}
+
+/// Returns the color code for spinner templates (indicatif/console style string).
+///
+/// Uses 256-color indices for better fidelity than basic ANSI names.
+/// The `console` crate's `from_dotted_str` accepts bare integers as Color256.
+///
+/// Target truecolor palette (for when indicatif gains RGB support):
+///   Total:   Blue Bell      `#4f95c9` → rgb(79, 149, 201)
+///   Success: Medium Jungle  `#5ba84f` → rgb(91, 168, 79)
+///   Failed:  Tomato Jam     `#c8352a` → rgb(200, 53, 42)
+fn spinner_color_code(kind: SpinnerKind) -> &'static str {
+    match kind {
+        SpinnerKind::Total => "74",   // 256-color: medium sky blue
+        SpinnerKind::Success => "71", // 256-color: olive green
+        SpinnerKind::Failed => "160", // 256-color: dark red
     }
 }
 
 /// Returns the dim color code for spinner elapsed time.
+///
+/// Target truecolor: Rosy Granite `#8e9094` → rgb(142, 144, 148)
 fn spinner_dim_code() -> &'static str {
-    if *TRUECOLOR {
-        "142,144,148" // Rosy Granite
-    } else {
-        "dim"
-    }
+    "248" // 256-color: grey
 }
 
 /// Error enum covering all failure modes in myrc.
@@ -716,15 +730,30 @@ pub struct Column {
     pub align: Align,
 }
 
+/// Optional per-cell color function.
+/// Called with (row_index, col_index, padded_cell_str) → colored string.
+type CellColorFn = Box<dyn Fn(usize, usize, &str) -> String>;
+
 /// Aligned columnar output with bold headers, optional totals row.
 ///
 /// Adapts to terminal width. Right-aligns numbers, left-aligns strings.
 /// Column separation: 2 spaces.
-#[derive(Debug)]
 pub struct Table {
     columns: Vec<Column>,
     rows: Vec<Vec<String>>,
     totals: Option<Vec<String>>,
+    cell_color: Option<CellColorFn>,
+}
+
+impl fmt::Debug for Table {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Table")
+            .field("columns", &self.columns)
+            .field("rows", &self.rows)
+            .field("totals", &self.totals)
+            .field("cell_color", &self.cell_color.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl Table {
@@ -733,6 +762,7 @@ impl Table {
             columns,
             rows: Vec::new(),
             totals: None,
+            cell_color: None,
         }
     }
 
@@ -756,6 +786,15 @@ impl Table {
         if let Some(col) = self.columns.get_mut(index) {
             col.align = Align::Right;
         }
+        self
+    }
+
+    /// Set a per-cell color callback, applied after padding to preserve alignment.
+    pub fn set_cell_color<F>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn(usize, usize, &str) -> String + 'static,
+    {
+        self.cell_color = Some(Box::new(f));
         self
     }
 
@@ -802,14 +841,19 @@ impl Table {
         out.push('\n');
 
         // Data rows
-        for row in &self.rows {
+        for (row_idx, row) in self.rows.iter().enumerate() {
             let parts: Vec<String> = self
                 .columns
                 .iter()
                 .enumerate()
                 .map(|(i, col)| {
                     let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
-                    pad(cell, widths[i], col.align)
+                    let padded = pad(cell, widths[i], col.align);
+                    if let Some(ref color_fn) = self.cell_color {
+                        color_fn(row_idx, i, &padded)
+                    } else {
+                        padded
+                    }
                 })
                 .collect();
             out.push_str(&parts.join(sep));
@@ -883,7 +927,7 @@ impl SpinnerGroup {
         let dim = spinner_dim_code();
 
         let template = format!(
-            "{{spinner:.{color}}} {{prefix:.bold.white:<12}} {{msg:.bold.{color}:>6}} {{elapsed:.{dim}}}"
+            "{{spinner:.{color}}} {{prefix:.bold:<12}} {{msg:.bold.{color}:>6}} {{elapsed:.{dim}}}"
         );
 
         let style = ProgressStyle::default_spinner()

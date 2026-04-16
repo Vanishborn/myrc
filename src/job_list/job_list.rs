@@ -4,8 +4,8 @@ use clap::Args as ClapArgs;
 use serde::Serialize;
 
 use crate::common::{
-    Align, Column, OutputMode, Table, color_dim, format_memory, parse_slurm_kv, resolve_user,
-    slurm_cmd,
+    Align, Column, OutputMode, Table, color_dim, color_job_state, format_memory, parse_slurm_kv,
+    resolve_user, slurm_cmd,
 };
 
 /// List and filter a user's jobs.
@@ -326,6 +326,14 @@ fn print_table(jobs: &[JobRow]) {
             format_memory(parse_req_mem_bytes(&job.req_mem)),
         ]);
     }
+
+    table.set_cell_color(|_row_idx, col_idx, padded| {
+        if col_idx == 3 {
+            color_job_state(padded).to_string()
+        } else {
+            padded.to_string()
+        }
+    });
 
     print!("{table}");
 }

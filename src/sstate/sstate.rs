@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use crate::common::{ClusterEnv, OutputMode, Table, format_memory, slurm_cmd};
+use crate::common::{
+    ClusterEnv, OutputMode, Table, color_error, color_success, color_warning, format_memory,
+    slurm_cmd,
+};
 
 /// Arguments for `myrc sstate`.
 #[derive(Debug, ClapArgs)]
@@ -9,6 +12,10 @@ pub struct Args {
     /// Filter to a specific partition.
     #[arg(short = 'p', long = "partition")]
     pub partition: Option<String>,
+
+    /// Show raw availability (disable bottleneck rule and state filtering).
+    #[arg(long = "raw")]
+    pub raw: bool,
 }
 
 /// Parsed per-node resource data.
@@ -62,6 +69,51 @@ impl NodeInfo {
             (self.alloc_gpus as f64 / self.total_gpus as f64) * 100.0
         }
     }
+
+    /// Effective available CPUs after state filter + bottleneck rule.
+    fn effective_avail_cpus(&self) -> u64 {
+        if is_node_unavailable(&self.state) {
+            return 0;
+        }
+        let cpu = self.avail_cpus();
+        let mem = self.avail_mem_bytes();
+        let gpu = self.avail_gpus();
+        if cpu == 0 || mem == 0 || (self.has_gpus && gpu == 0) {
+            0
+        } else {
+            cpu
+        }
+    }
+
+    /// Effective available memory after state filter + bottleneck rule.
+    fn effective_avail_mem_bytes(&self) -> u64 {
+        if is_node_unavailable(&self.state) {
+            return 0;
+        }
+        let cpu = self.avail_cpus();
+        let mem = self.avail_mem_bytes();
+        let gpu = self.avail_gpus();
+        if cpu == 0 || mem == 0 || (self.has_gpus && gpu == 0) {
+            0
+        } else {
+            mem
+        }
+    }
+
+    /// Effective available GPUs after state filter + bottleneck rule.
+    fn effective_avail_gpus(&self) -> u64 {
+        if is_node_unavailable(&self.state) {
+            return 0;
+        }
+        let cpu = self.avail_cpus();
+        let mem = self.avail_mem_bytes();
+        let gpu = self.avail_gpus();
+        if cpu == 0 || mem == 0 || (self.has_gpus && gpu == 0) {
+            0
+        } else {
+            gpu
+        }
+    }
 }
 
 pub async fn run(args: &Args, mode: OutputMode) -> Result<()> {
@@ -111,9 +163,9 @@ pub async fn run(args: &Args, mode: OutputMode) -> Result<()> {
     let any_gpus = nodes.iter().any(|n| n.has_gpus);
 
     if mode.is_json() {
-        print_json(&cluster, args, &nodes, any_gpus)?;
+        print_json(&cluster, args, &nodes, any_gpus, args.raw)?;
     } else {
-        print_table(&nodes, any_gpus);
+        print_table(&nodes, any_gpus, args.raw);
     }
 
     Ok(())
@@ -335,7 +387,7 @@ fn parse_alloc_tres_gpu(s: &str) -> u64 {
     0
 }
 
-fn print_table(nodes: &[NodeInfo], any_gpus: bool) {
+fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
     let headers: Vec<&str> = vec![
         "Node",
         "AllocCPU",
@@ -361,36 +413,42 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool) {
     }
 
     for n in nodes {
-        let gpu_alloc = if n.has_gpus {
-            n.alloc_gpus.to_string()
+        let avail_cpu = if raw {
+            n.avail_cpus()
         } else {
-            "N/A".into()
+            n.effective_avail_cpus()
         };
-        let gpu_avail = if n.has_gpus {
-            n.avail_gpus().to_string()
+        let avail_mem = if raw {
+            n.avail_mem_bytes()
         } else {
-            "N/A".into()
+            n.effective_avail_mem_bytes()
         };
-        let gpu_total = if n.has_gpus {
-            n.total_gpus.to_string()
+
+        let (gpu_alloc, gpu_avail, gpu_total, gpu_pct) = if n.has_gpus {
+            let avail = if raw {
+                n.avail_gpus()
+            } else {
+                n.effective_avail_gpus()
+            };
+            (
+                n.alloc_gpus.to_string(),
+                avail.to_string(),
+                n.total_gpus.to_string(),
+                format!("{:.2}", n.percent_used_gpu()),
+            )
         } else {
-            "N/A".into()
-        };
-        let gpu_pct = if n.has_gpus {
-            format!("{:.2}", n.percent_used_gpu())
-        } else {
-            "N/A".into()
+            ("N/A".into(), "N/A".into(), "N/A".into(), "N/A".into())
         };
 
         table.add_row(vec![
             n.name.clone(),
             n.alloc_cpus.to_string(),
-            n.avail_cpus().to_string(),
+            avail_cpu.to_string(),
             n.total_cpus.to_string(),
             format!("{:.2}", n.percent_used_cpu()),
             format!("{:.2}", n.cpu_load),
             format_memory(n.alloc_mem_bytes),
-            format_memory(n.avail_mem_bytes()),
+            format_memory(avail_mem),
             format_memory(n.total_mem_bytes),
             format!("{:.2}", n.percent_used_mem()),
             gpu_alloc,
@@ -401,14 +459,74 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool) {
         ]);
     }
 
+    // Pre-compute owned color metadata for the 'static closure
+    let node_color_info: Vec<(String, bool, bool)> = nodes
+        .iter()
+        .map(|n| {
+            let unavailable = is_node_unavailable(&n.state);
+            let bottleneck = !raw
+                && !unavailable
+                && n.effective_avail_cpus() == 0
+                && n.effective_avail_mem_bytes() == 0;
+            (n.state.clone(), unavailable, bottleneck)
+        })
+        .collect();
+
+    table.set_cell_color(move |row_idx, col_idx, padded| {
+        let (ref state, unavailable, bottleneck) = node_color_info[row_idx];
+
+        // NodeState column (14): color by state flags
+        if col_idx == 14 {
+            if unavailable {
+                if state
+                    .split('+')
+                    .any(|f| f == "DOWN" || f == "NOT_RESPONDING")
+                {
+                    return color_error(padded).to_string();
+                }
+                return color_warning(padded).to_string();
+            }
+            if state == "IDLE" {
+                return color_success(padded).to_string();
+            }
+            return padded.to_string();
+        }
+
+        // Avail columns (2=AvailCPU, 7=AvailMem, 11=AvailGPU):
+        // red if bottleneck (all effective=0) on a normally-available node
+        if bottleneck && matches!(col_idx, 2 | 7 | 11) {
+            return color_error(padded).to_string();
+        }
+
+        padded.to_string()
+    });
+
     // Totals row
     let node_count = nodes.len() as u64;
     let total_alloc_cpus: u64 = nodes.iter().map(|n| n.alloc_cpus).sum();
-    let total_avail_cpus: u64 = nodes.iter().map(|n| n.avail_cpus()).sum();
+    let total_avail_cpus: u64 = nodes
+        .iter()
+        .map(|n| {
+            if raw {
+                n.avail_cpus()
+            } else {
+                n.effective_avail_cpus()
+            }
+        })
+        .sum();
     let total_cpus: u64 = nodes.iter().map(|n| n.total_cpus).sum();
     let total_cpu_load: f64 = nodes.iter().map(|n| n.cpu_load).sum::<f64>() / nodes.len() as f64;
     let total_alloc_mem: u64 = nodes.iter().map(|n| n.alloc_mem_bytes).sum();
-    let total_avail_mem: u64 = nodes.iter().map(|n| n.avail_mem_bytes()).sum();
+    let total_avail_mem: u64 = nodes
+        .iter()
+        .map(|n| {
+            if raw {
+                n.avail_mem_bytes()
+            } else {
+                n.effective_avail_mem_bytes()
+            }
+        })
+        .sum();
     let total_mem: u64 = nodes.iter().map(|n| n.total_mem_bytes).sum();
     let pct_cpu = if total_cpus > 0 {
         (total_alloc_cpus as f64 / total_cpus as f64) * 100.0
@@ -422,7 +540,16 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool) {
     };
 
     let total_alloc_gpus: u64 = nodes.iter().map(|n| n.alloc_gpus).sum();
-    let total_avail_gpus: u64 = nodes.iter().map(|n| n.avail_gpus()).sum();
+    let total_avail_gpus: u64 = nodes
+        .iter()
+        .map(|n| {
+            if raw {
+                n.avail_gpus()
+            } else {
+                n.effective_avail_gpus()
+            }
+        })
+        .sum();
     let total_gpus_sum: u64 = nodes.iter().map(|n| n.total_gpus).sum();
     let pct_gpu = if total_gpus_sum > 0 {
         (total_alloc_gpus as f64 / total_gpus_sum as f64) * 100.0
@@ -472,26 +599,47 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool) {
     print!("{table}");
 }
 
-fn print_json(cluster: &ClusterEnv, args: &Args, nodes: &[NodeInfo], any_gpus: bool) -> Result<()> {
+fn print_json(
+    cluster: &ClusterEnv,
+    args: &Args,
+    nodes: &[NodeInfo],
+    any_gpus: bool,
+    raw: bool,
+) -> Result<()> {
     let json_nodes: Vec<serde_json::Value> = nodes
         .iter()
         .map(|n| {
+            let avail_cpu = if raw {
+                n.avail_cpus()
+            } else {
+                n.effective_avail_cpus()
+            };
+            let avail_mem = if raw {
+                n.avail_mem_bytes()
+            } else {
+                n.effective_avail_mem_bytes()
+            };
             let mut obj = serde_json::json!({
                 "node": n.name,
                 "alloc_cpus": n.alloc_cpus,
-                "avail_cpus": n.avail_cpus(),
+                "avail_cpus": avail_cpu,
                 "total_cpus": n.total_cpus,
                 "percent_used_cpu": round2(n.percent_used_cpu()),
                 "cpu_load": round2(n.cpu_load),
                 "alloc_mem_bytes": n.alloc_mem_bytes,
-                "avail_mem_bytes": n.avail_mem_bytes(),
+                "avail_mem_bytes": avail_mem,
                 "total_mem_bytes": n.total_mem_bytes,
                 "percent_used_mem": round2(n.percent_used_mem()),
                 "state": n.state,
             });
             if n.has_gpus {
+                let avail_gpu = if raw {
+                    n.avail_gpus()
+                } else {
+                    n.effective_avail_gpus()
+                };
                 obj["alloc_gpus"] = serde_json::json!(n.alloc_gpus);
-                obj["avail_gpus"] = serde_json::json!(n.avail_gpus());
+                obj["avail_gpus"] = serde_json::json!(avail_gpu);
                 obj["total_gpus"] = serde_json::json!(n.total_gpus);
                 obj["percent_used_gpu"] = serde_json::json!(round2(n.percent_used_gpu()));
             } else {
@@ -507,12 +655,30 @@ fn print_json(cluster: &ClusterEnv, args: &Args, nodes: &[NodeInfo], any_gpus: b
     // Compute totals
     let node_count = nodes.len() as u64;
     let total_alloc_cpus: u64 = nodes.iter().map(|n| n.alloc_cpus).sum();
-    let total_avail_cpus: u64 = nodes.iter().map(|n| n.avail_cpus()).sum();
+    let total_avail_cpus: u64 = nodes
+        .iter()
+        .map(|n| {
+            if raw {
+                n.avail_cpus()
+            } else {
+                n.effective_avail_cpus()
+            }
+        })
+        .sum();
     let total_cpus: u64 = nodes.iter().map(|n| n.total_cpus).sum();
     let total_cpu_load: f64 =
         nodes.iter().map(|n| n.cpu_load).sum::<f64>() / nodes.len().max(1) as f64;
     let total_alloc_mem: u64 = nodes.iter().map(|n| n.alloc_mem_bytes).sum();
-    let total_avail_mem: u64 = nodes.iter().map(|n| n.avail_mem_bytes()).sum();
+    let total_avail_mem: u64 = nodes
+        .iter()
+        .map(|n| {
+            if raw {
+                n.avail_mem_bytes()
+            } else {
+                n.effective_avail_mem_bytes()
+            }
+        })
+        .sum();
     let total_mem: u64 = nodes.iter().map(|n| n.total_mem_bytes).sum();
     let pct_cpu = if total_cpus > 0 {
         (total_alloc_cpus as f64 / total_cpus as f64) * 100.0
@@ -526,7 +692,16 @@ fn print_json(cluster: &ClusterEnv, args: &Args, nodes: &[NodeInfo], any_gpus: b
     };
 
     let total_alloc_gpus: u64 = nodes.iter().map(|n| n.alloc_gpus).sum();
-    let total_avail_gpus: u64 = nodes.iter().map(|n| n.avail_gpus()).sum();
+    let total_avail_gpus: u64 = nodes
+        .iter()
+        .map(|n| {
+            if raw {
+                n.avail_gpus()
+            } else {
+                n.effective_avail_gpus()
+            }
+        })
+        .sum();
     let total_gpus_sum: u64 = nodes.iter().map(|n| n.total_gpus).sum();
     let pct_gpu = if total_gpus_sum > 0 {
         (total_alloc_gpus as f64 / total_gpus_sum as f64) * 100.0
@@ -570,6 +745,26 @@ fn print_json(cluster: &ClusterEnv, args: &Args, nodes: &[NodeInfo], any_gpus: b
 /// Round to 2 decimal places.
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+/// Check if a node's state flags indicate it cannot accept new jobs.
+fn is_node_unavailable(state: &str) -> bool {
+    const UNAVAILABLE_FLAGS: &[&str] = &[
+        "DOWN",
+        "DRAIN",
+        "NOT_RESPONDING",
+        "MAINTENANCE",
+        "RESERVED",
+        "FUTURE",
+        "POWER_DOWN",
+        "POWERED_DOWN",
+        "REBOOT_REQUESTED",
+        "REBOOT_ISSUED",
+        "INVALID_REG",
+    ];
+    state
+        .split('+')
+        .any(|flag| UNAVAILABLE_FLAGS.contains(&flag))
 }
 
 #[cfg(test)]
@@ -739,5 +934,146 @@ mod tests {
     fn expand_multiple_ranges() {
         let nodes = expand_node_list("gl[1000-1001]");
         assert_eq!(nodes, vec!["gl1000", "gl1001"]);
+    }
+
+    #[test]
+    fn test_is_node_unavailable() {
+        // Available states
+        assert!(!is_node_unavailable("IDLE"));
+        assert!(!is_node_unavailable("MIXED"));
+        assert!(!is_node_unavailable("ALLOCATED"));
+        assert!(!is_node_unavailable("MIXED+PLANNED"));
+        assert!(!is_node_unavailable("COMPLETING"));
+        assert!(!is_node_unavailable("ALLOCATED+COMPLETING"));
+
+        // Unavailable states
+        assert!(is_node_unavailable("DOWN+NOT_RESPONDING"));
+        assert!(is_node_unavailable("IDLE+MAINTENANCE+RESERVED"));
+        assert!(is_node_unavailable("MIXED+DRAIN"));
+        assert!(is_node_unavailable("ALLOCATED+DRAIN"));
+        assert!(is_node_unavailable("IDLE+RESERVED"));
+        assert!(is_node_unavailable("ALLOCATED+RESERVED"));
+        assert!(is_node_unavailable("MIXED+RESERVED"));
+        assert!(is_node_unavailable(
+            "DOWN+MAINTENANCE+RESERVED+NOT_RESPONDING"
+        ));
+        assert!(is_node_unavailable("DOWN+INVALID_REG"));
+        assert!(is_node_unavailable("FUTURE"));
+        assert!(is_node_unavailable("POWER_DOWN"));
+        assert!(is_node_unavailable("REBOOT_ISSUED"));
+    }
+
+    #[test]
+    fn test_effective_avail_bottleneck_gpu() {
+        let node = NodeInfo {
+            name: "gl1000".into(),
+            alloc_cpus: 2,
+            total_cpus: 40,
+            cpu_load: 0.82,
+            alloc_mem_bytes: 80 * (1 << 30),
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 2,
+            total_gpus: 2,
+            has_gpus: true,
+            state: "MIXED+PLANNED".into(),
+        };
+        assert_eq!(node.avail_cpus(), 38);
+        assert_eq!(node.effective_avail_cpus(), 0);
+        assert_eq!(node.effective_avail_mem_bytes(), 0);
+        assert_eq!(node.effective_avail_gpus(), 0);
+    }
+
+    #[test]
+    fn test_effective_avail_bottleneck_mem() {
+        let node = NodeInfo {
+            name: "gl3074".into(),
+            alloc_cpus: 4,
+            total_cpus: 36,
+            cpu_load: 1.0,
+            alloc_mem_bytes: 180 * (1 << 30),
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 0,
+            total_gpus: 0,
+            has_gpus: false,
+            state: "MIXED".into(),
+        };
+        assert_eq!(node.avail_cpus(), 32);
+        assert_eq!(node.effective_avail_cpus(), 0);
+        assert_eq!(node.effective_avail_mem_bytes(), 0);
+    }
+
+    #[test]
+    fn test_effective_avail_bottleneck_cpu() {
+        let node = NodeInfo {
+            name: "gl3009".into(),
+            alloc_cpus: 36,
+            total_cpus: 36,
+            cpu_load: 36.0,
+            alloc_mem_bytes: 54 * (1 << 30),
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 0,
+            total_gpus: 0,
+            has_gpus: false,
+            state: "ALLOCATED".into(),
+        };
+        assert_eq!(node.avail_mem_bytes(), 126 * (1 << 30));
+        assert_eq!(node.effective_avail_cpus(), 0);
+        assert_eq!(node.effective_avail_mem_bytes(), 0);
+    }
+
+    #[test]
+    fn test_effective_avail_no_bottleneck() {
+        let node = NodeInfo {
+            name: "gl3010".into(),
+            alloc_cpus: 29,
+            total_cpus: 36,
+            cpu_load: 29.0,
+            alloc_mem_bytes: 175 * (1 << 30),
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 0,
+            total_gpus: 0,
+            has_gpus: false,
+            state: "MIXED".into(),
+        };
+        assert_eq!(node.effective_avail_cpus(), 7);
+        assert_eq!(node.effective_avail_mem_bytes(), 5 * (1 << 30));
+    }
+
+    #[test]
+    fn test_effective_avail_unavailable_state() {
+        let node = NodeInfo {
+            name: "gl3399".into(),
+            alloc_cpus: 24,
+            total_cpus: 36,
+            cpu_load: 24.0,
+            alloc_mem_bytes: 168 * (1 << 30),
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 0,
+            total_gpus: 0,
+            has_gpus: false,
+            state: "MIXED+DRAIN".into(),
+        };
+        assert_eq!(node.avail_cpus(), 12);
+        assert_eq!(node.effective_avail_cpus(), 0);
+        assert_eq!(node.effective_avail_mem_bytes(), 0);
+    }
+
+    #[test]
+    fn test_effective_avail_idle_gpu_node() {
+        let node = NodeInfo {
+            name: "gl1018".into(),
+            alloc_cpus: 0,
+            total_cpus: 40,
+            cpu_load: 0.0,
+            alloc_mem_bytes: 0,
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 0,
+            total_gpus: 2,
+            has_gpus: true,
+            state: "IDLE".into(),
+        };
+        assert_eq!(node.effective_avail_cpus(), 40);
+        assert_eq!(node.effective_avail_mem_bytes(), 180 * (1 << 30));
+        assert_eq!(node.effective_avail_gpus(), 2);
     }
 }

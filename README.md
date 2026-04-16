@@ -26,6 +26,7 @@ myrc <COMMAND> [OPTIONS]
 | Flag            | Description                                               |
 | --------------- | --------------------------------------------------------- |
 | `--json`        | Output JSON instead of table format                       |
+| `--color`       | Color mode: `auto` (default), `always`, `never`           |
 | `-v, --verbose` | Increase verbosity (`-v` info, `-vv` debug, `-vvv` trace) |
 
 Commands that accept `-u, --user` default to `$USER` when omitted.
@@ -138,18 +139,44 @@ Set up a personal Lmod module directory.
 
 Per-node cluster resource dashboard (CPU, memory, GPU allocation and availability).
 
-| Flag              | Description                    |
-| ----------------- | ------------------------------ |
-| `-p, --partition` | Filter to a specific partition |
+| Flag              | Description                                                         |
+| ----------------- | ------------------------------------------------------------------- |
+| `-p, --partition` | Filter to a specific partition                                      |
+| `--raw`           | Show raw availability (disable bottleneck rule and state filtering) |
 
 ### `myrc completions <SHELL>`
 
 Generate shell completion script. Supported shells: `bash`, `zsh`, `fish`.
 
+**Bash:**
+
 ```bash
-# Example: install bash completions
+mkdir -p ~/.local/share/bash-completion/completions
 myrc completions bash > ~/.local/share/bash-completion/completions/myrc
 ```
+
+**Zsh:**
+
+```bash
+mkdir -p ~/.zsh/completions
+myrc completions zsh > ~/.zsh/completions/_myrc
+```
+
+Then add the following to `~/.zshrc` **before** `compinit`:
+
+```bash
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+**Fish:**
+
+```bash
+mkdir -p ~/.config/fish/completions
+myrc completions fish > ~/.config/fish/completions/myrc.fish
+```
+
+Restart the shell after installing completions for them to take effect.
 
 ## Build
 
@@ -184,6 +211,25 @@ Cross-compilation requires [zig](https://ziglang.org/) and [cargo-zigbuild](http
 - RHEL/Rocky 7+ (glibc 2.17+)
 
 See [docs/adapting.md](docs/adapting.md) for notes on adapting to other institutions.
+
+## Color
+
+Colored output is enabled automatically for interactive terminals and disabled when piping or redirecting.
+
+Override with the `--color` flag:
+
+```bash
+myrc --color=never sstate   # no ANSI escapes
+myrc --color=always sstate  # force color even when piped
+```
+
+The tool also respects the [`NO_COLOR`](https://no-color.org/) convention.
+
+Set `NO_COLOR=1` in your environment to suppress color globally:
+
+```bash
+export NO_COLOR=1
+```
 
 ## License
 

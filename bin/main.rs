@@ -1,8 +1,9 @@
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use clap_mangen::Man;
-use shadow_rs::shadow;
+use colored::control::set_override;
+use shadow_rs::{formatcp, shadow};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -27,13 +28,41 @@ use myrc::usage;
 
 shadow!(build);
 
+const AUTHOR: &str = "Haoran \"Henry\" Li @ University of Michigan";
+
+const CUSTOM_VERSION: &str = formatcp!(
+    "{}\nAuthor: {}\nTarget: {}",
+    build::PKG_VERSION,
+    AUTHOR,
+    build::BUILD_TARGET,
+);
+
+const ABOUT: &str = formatcp!(
+    "Unified CLI for UM HPC cluster resources\nAuthor: {}",
+    AUTHOR,
+);
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ColorMode {
+    /// Automatic: color when stdout is a terminal.
+    Auto,
+    /// Always emit color, even through a pipe.
+    Always,
+    /// Never emit color.
+    Never,
+}
+
 #[derive(Parser)]
-#[command(name = "myrc", about = "Unified CLI for UM HPC cluster resources")]
-#[command(version, long_version = build::CLAP_LONG_VERSION)]
+#[command(name = "myrc", about = ABOUT)]
+#[command(version = CUSTOM_VERSION)]
 struct Cli {
     /// Output as JSON instead of table.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Control color output (auto, always, never).
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto, global = true, hide_possible_values = true)]
+    color: ColorMode,
 
     /// Increase verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
@@ -129,6 +158,13 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // Apply color mode before any output
+    match cli.color {
+        ColorMode::Always => set_override(true),
+        ColorMode::Never => set_override(false),
+        ColorMode::Auto => {} // let colored crate decide (TTY + NO_COLOR)
+    }
 
     let log_level = match cli.verbose {
         0 => Level::WARN,

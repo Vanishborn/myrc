@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Args as ClapArgs;
+use colored::Colorize;
 use serde::Serialize;
 
 use crate::common::{
-    Align, ClusterEnv, Column, MyrcError, OutputMode, SpinnerGroup, SpinnerKind, Table,
+    Align, ClusterEnv, Column, DIVIDER, MyrcError, OutputMode, SpinnerGroup, SpinnerKind, Table,
     billing_divisor, format_dollars, parse_slurm_kv, resolve_user, slurm_cmd,
 };
 
@@ -152,9 +153,8 @@ pub fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
     }
 
     // Human-readable table output
-    println!("------------------------------------");
-    println!("Usage from {start_str} to {end_str}:");
-    println!("------------------------------------");
+    println!("{}", format!("Usage from {start_str} to {end_str}").bold());
+    println!("{DIVIDER}");
 
     let mut table = Table::new(vec![
         Column {

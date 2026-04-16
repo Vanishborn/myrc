@@ -8,7 +8,8 @@ use clap::Args as ClapArgs;
 use colored::Colorize;
 
 use crate::common::{
-    ClusterEnv, OutputMode, color_warning, format_walltime_human, format_walltime_slurm,
+    ClusterEnv, OutputMode, color_success, color_warning, format_walltime_human,
+    format_walltime_slurm,
 };
 
 /// Maximum walltime cap: 14 days.
@@ -84,7 +85,10 @@ pub fn run(args: &Args, mode: OutputMode) -> Result<()> {
             println!("{slurm_fmt}");
         } else {
             let human_fmt = format_walltime_human(max_wt);
-            println!("No maintenance window currently scheduled.");
+            println!(
+                "{}",
+                color_success("No maintenance window currently scheduled.")
+            );
             println!("Maximum wall time is {slurm_fmt} ({human_fmt}).");
         }
         return Ok(());
