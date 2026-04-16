@@ -231,6 +231,12 @@ Set `NO_COLOR=1` in your environment to suppress color globally:
 export NO_COLOR=1
 ```
 
+To enable truecolor (curated palette instead of default 256-color):
+
+```bash
+export COLORTERM=truecolor
+```
+
 ## License
 
 GPL-3.0-or-later.
