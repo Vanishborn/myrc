@@ -742,7 +742,7 @@ alias sstate='myrc sstate'
 
 ### 10.2 Data Files
 
-`etc/` epoch files read from `$MYRC_ETC_DIR` (default: `/sw/pkgs/arc/usertools/etc/`).
+`etc/` epoch files read from `$MYRC_ETC_DIR`. The compiled-in default points to the legacy slurm-usertools path (`/sw/pkgs/arc/usertools/etc/`); IT may override this at deployment time.
 
 ---
 
@@ -859,10 +859,10 @@ sha256sum -c checksums.txt
 # Build release for the primary platform
 make release
 
-# Deploy to cluster
-scp dist/myrc_<VERSION>_x86_64-unknown-linux-gnu.tar.gz login.greatlakes.hpc.umich.edu:/tmp/
-ssh login.greatlakes.hpc.umich.edu
-tar xzf /tmp/myrc_<VERSION>_x86_64-unknown-linux-gnu.tar.gz -C /sw/pkgs/arc/usertools/bin/
+# Deploy to cluster (paths determined by IT)
+scp dist/myrc_<VERSION>_x86_64-unknown-linux-gnu.tar.gz <login-node>:/tmp/
+ssh <login-node>
+tar xzf /tmp/myrc_<VERSION>_x86_64-unknown-linux-gnu.tar.gz -C <install-dir>/
 ```
 
 #### GitHub Releases
