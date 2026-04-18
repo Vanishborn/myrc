@@ -1,7 +1,7 @@
 # myrc Design Document
 
 > Authoritative architectural reference for the `myrc` CLI toolkit.
-> Current as of v0.3.0.
+> Current as of v0.3.1.
 > Covers naming, project structure, module contracts, concurrency patterns,
 > terminal aesthetics, dependencies, build, and deployment.
 > Consult this document before writing or reviewing any code.
@@ -495,7 +495,7 @@ This is what makes `myrc` feel like one product.
 |             |                                                |
 | ----------- | ---------------------------------------------- |
 | **Command** | `myrc usage [USER] [--year YYYY] [--month MM]` |
-| **Runtime** | sync                                           |
+| **Runtime** | tokio                                          |
 | **Calls**   | `sreport` (single)                             |
 | **Notes**   | Lighthouse cluster exclusion                   |
 
@@ -627,11 +627,11 @@ Tokio is used selectively. Subcommands that benefit from async I/O enter the run
 | `job_list`        | tokio   | `sacct` async call with filters      |
 | `job_stats`       | tokio   | `sacct --json` async call            |
 | `sstate`          | tokio   | `scontrol show node` async call      |
-| All others        | sync    | Computation or no I/O                |
+| `usage`           | tokio   | `sreport` async call                 |
 
 ### 7.1 Signal Handling & Graceful Shutdown
 
-Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`tail` exits cleanly. Ctrl+C terminates the process group, which also kills spawned child processes.
+Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`tail` exits cleanly. Ctrl+C terminates the process group, which also kills spawned child processes. All async subprocesses use `.kill_on_drop(true)` to ensure child processes are cleaned up when a timeout fires or the future is cancelled.
 
 ---
 
@@ -640,7 +640,7 @@ Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`ta
 ```toml
 [package]
 name = "myrc"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -788,10 +788,10 @@ Versions follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`):
 - `MINOR`: new subcommands, new flags, new JSON fields (backward-compatible)
 - `PATCH`: bug fixes, performance improvements, output formatting tweaks
 
-The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, `v0.3.0`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
+The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
 
 ```zsh
-myrc 0.3.0
+myrc 0.3.1
 Author: Haoran "Henry" Li @ University of Michigan
 Target: x86_64-unknown-linux-gnu
 ```
@@ -930,7 +930,7 @@ Return `Result` from all module `run()` functions. `MyrcError` carries an `exit_
 
 ### 15.1 Unit Tests
 
-`#[cfg(test)]` modules alongside each source file. Test parsing, formatting, data transforms, walltime/memory conversion, billing divisor logic.
+`#[cfg(test)]` modules alongside each source file. Test parsing, formatting, data transforms, walltime/memory conversion, billing divisor logic. Fixture-grounded tests use representative `scontrol`, `sacct`, and `sreport` output captured from production clusters to validate parsers against real-world data.
 
 ### 15.2 CI Pipeline
 
@@ -966,10 +966,11 @@ UMich clusters run **Slurm 25.11.1**. This is well past the 21.08 threshold for 
 
 Items deferred from v0.1.0. Revisit after all current modules are stable.
 
-| ID  | Area                | Description                                                                                                                                                                                                                                 |
-| --- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| T-1 | `modules setup`     | Template selection menu: offer hello/python-venv/conda/custom starters                                                                                                                                                                      |
-| T-2 | `grufi`             | Full Rust rewrite of GUFI storage analysis tooling                                                                                                                                                                                          |
-| T-3 | Timeout tuning      | Tune 30s timeout and 12-concurrent cap based on production experience (§4.1, §7)                                                                                                                                                            |
-| T-4 | JSON schema freeze  | Version-stamp and freeze JSON schemas for machine-consumer stability. Post-v0.1.0 after real usage stabilizes schemas                                                                                                                       |
-| T-5 | Dynamic completions | Add custom `clap_complete` completers for flags that accept Slurm-queryable values: `-a` (accounts via `sacctmgr`), `-p` (partitions via `scontrol`). Each tab press runs a live Slurm query (~100–500ms). Only functional on cluster nodes |
+| ID  | Area                | Description                                                                                                                                                                                                                                                                                         |
+| --- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| T-1 | `modules setup`     | Template selection menu: offer hello/python-venv/conda/custom starters                                                                                                                                                                                                                              |
+| T-2 | `grufi`             | Full Rust rewrite of GUFI storage analysis tooling                                                                                                                                                                                                                                                  |
+| T-3 | Timeout tuning      | Tune 30s timeout and 12-concurrent cap based on production experience (§4.1, §7)                                                                                                                                                                                                                    |
+| T-4 | JSON schema freeze  | Version-stamp and freeze JSON schemas for machine-consumer stability. Post-v0.1.0 after real usage stabilizes schemas                                                                                                                                                                               |
+| T-5 | Dynamic completions | Add custom `clap_complete` completers for flags that accept Slurm-queryable values: `-a` (accounts via `sacctmgr`), `-p` (partitions via `scontrol`). Each tab press runs a live Slurm query (~100–500ms). Only functional on cluster nodes                                                         |
+| T-6 | Array job handling  | `job stats`: detect when `sacct --json -j BASE_ID` returns multiple array tasks and warn instead of silently taking the first. Show `array_job_id`/`array_task_id` in `print_report` title when set. `job header`: add `SLURM_ARRAY_JOB_ID` and `SLURM_ARRAY_TASK_ID` to the displayed env var list |

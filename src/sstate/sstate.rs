@@ -1076,4 +1076,127 @@ mod tests {
         assert_eq!(node.effective_avail_mem_bytes(), 180 * (1 << 30));
         assert_eq!(node.effective_avail_gpus(), 2);
     }
+
+    #[test]
+    fn extract_partition_nodes_from_real_output() {
+        let output = "\
+PartitionName=gpu
+   AllowGroups=ALL DenyAccounts=acct1,acct2 AllowQos=ALL
+   Nodes=gl[1000-1023]
+   State=UP TotalCPUs=960 TotalNodes=24
+   TRESBillingWeights=cpu=1369.560185,mem=304.3467078G,GRES/gpu=27391.2037
+";
+        let nodes = extract_partition_nodes(output);
+        assert_eq!(nodes.len(), 24);
+        assert_eq!(nodes[0], "gl1000");
+        assert_eq!(nodes[23], "gl1023");
+    }
+
+    #[test]
+    fn extract_partition_nodes_armis2_style() {
+        // Non-contiguous ranges
+        let output = "\
+PartitionName=gpu
+   Nodes=armis[20108,20112-20114]
+   State=UP TotalCPUs=88 TotalNodes=4
+";
+        let nodes = extract_partition_nodes(output);
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(
+            nodes,
+            vec!["armis20108", "armis20112", "armis20113", "armis20114"]
+        );
+    }
+
+    #[test]
+    fn parse_gpu_count_model_titanv() {
+        assert_eq!(parse_gpu_count("gpu:titanv:4"), 4);
+        assert_eq!(parse_gpu_count("gpu:titanv:4(IDX:0-3)"), 4);
+    }
+
+    #[test]
+    fn parse_single_node_allocated_no_gpu() {
+        // Fully allocated CPU-only node, 1.5TB memory
+        let line = "NodeName=gl0000 Arch=x86_64 CoresPerSocket=18 \
+                     CPUAlloc=36 CPUTot=36 CPULoad=1.02 \
+                     AllocMem=1280000 RealMemory=1539072 \
+                     Gres=(null) GresUsed=gpu:0 \
+                     AllocTRES=cpu=3,mem=1250G \
+                     State=MIXED";
+        let node = parse_single_node(line).unwrap();
+        assert_eq!(node.name, "gl0000");
+        assert_eq!(node.alloc_cpus, 36);
+        assert_eq!(node.total_cpus, 36);
+        assert_eq!(node.total_mem_bytes, 1539072 * (1 << 20));
+        assert_eq!(node.total_gpus, 0);
+        assert!(!node.has_gpus);
+        assert_eq!(node.state, "MIXED");
+    }
+
+    #[test]
+    fn parse_single_node_idle_non_gpu() {
+        let line = "NodeName=gl3100 Arch=x86_64 \
+                     CPUAlloc=0 CPUTot=36 CPULoad=0.00 \
+                     AllocMem=0 RealMemory=184320 \
+                     Gres=(null) GresUsed=gpu:0 \
+                     AllocTRES= \
+                     State=IDLE";
+        let node = parse_single_node(line).unwrap();
+        assert_eq!(node.alloc_cpus, 0);
+        assert_eq!(node.total_cpus, 36);
+        assert_eq!(node.alloc_mem_bytes, 0);
+        assert_eq!(node.total_gpus, 0);
+        assert!(!node.has_gpus);
+        assert_eq!(node.state, "IDLE");
+        assert_eq!(node.effective_avail_cpus(), 36);
+        assert_eq!(node.effective_avail_mem_bytes(), 184320 * (1 << 20));
+    }
+
+    #[test]
+    fn parse_single_node_allocated_state() {
+        // ALLOCATED = all CPUs in use, non-GPU node
+        let line = "NodeName=gl3050 Arch=x86_64 \
+                     CPUAlloc=36 CPUTot=36 CPULoad=36.00 \
+                     AllocMem=180000 RealMemory=184320 \
+                     Gres=(null) GresUsed=gpu:0 \
+                     State=ALLOCATED";
+        let node = parse_single_node(line).unwrap();
+        assert_eq!(node.state, "ALLOCATED");
+        assert!(!is_node_unavailable(&node.state));
+        // CPU bottleneck → effective = 0
+        assert_eq!(node.effective_avail_cpus(), 0);
+    }
+
+    #[test]
+    fn parse_alloc_tres_gpu_empty_string() {
+        assert_eq!(parse_alloc_tres_gpu(""), 0);
+    }
+
+    #[test]
+    fn parse_single_node_cpu_load_exceeds_cpu_tot() {
+        // CPULoad > CPUTot (oversubscription)
+        let line = "NodeName=gl0001 Arch=x86_64 \
+                     CPUAlloc=14 CPUTot=36 CPULoad=55.92 \
+                     AllocMem=1263360 RealMemory=1539072 \
+                     Gres=(null) GresUsed=gpu:0 \
+                     State=MIXED";
+        let node = parse_single_node(line).unwrap();
+        assert!((node.cpu_load - 55.92).abs() < 0.01);
+        assert_eq!(node.total_cpus, 36);
+        assert!(node.cpu_load > node.total_cpus as f64);
+    }
+
+    #[test]
+    fn parse_node_output_multi_node() {
+        let output = "\
+NodeName=gl3009 CPUAlloc=29 CPUTot=36 CPULoad=29.00 AllocMem=175000 RealMemory=184320 Gres=(null) GresUsed=gpu:0 State=MIXED
+NodeName=gl1000 CPUAlloc=9 CPUTot=40 CPULoad=0.82 AllocMem=81920 RealMemory=184320 Gres=gpu:v100:2(S:0-1) AllocTRES=cpu=9,mem=80G,gres/gpu=2 State=MIXED+PLANNED";
+        let nodes = parse_node_output(output);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "gl3009");
+        assert!(!nodes[0].has_gpus);
+        assert_eq!(nodes[1].name, "gl1000");
+        assert!(nodes[1].has_gpus);
+        assert_eq!(nodes[1].alloc_gpus, 2);
+    }
 }

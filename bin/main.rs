@@ -216,7 +216,10 @@ fn run() -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(sstate::run(args, mode))
         }
-        Commands::Usage(ref args) => usage::run(args, mode),
+        Commands::Usage(ref args) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(usage::run(args, mode))
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "myrc", &mut std::io::stdout());
             Ok(())

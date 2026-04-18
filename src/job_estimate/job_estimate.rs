@@ -310,4 +310,90 @@ mod tests {
         assert!((billing - 200.0).abs() < f64::EPSILON);
         assert!((cost - 0.0012).abs() < 1e-10);
     }
+
+    #[test]
+    fn test_extract_tres_billing_weights_real_gl_gpu() {
+        let output = "\
+PartitionName=gpu
+   AllowGroups=ALL DenyAccounts=acct1,acct2 AllowQos=ALL
+   AllocNodes=ALL Default=NO QoS=gpu
+   Nodes=gl[1000-1023]
+   State=UP TotalCPUs=960 TotalNodes=24
+   DefMemPerNode=UNLIMITED MaxMemPerNode=UNLIMITED
+   TRES=cpu=960,mem=4320G,node=24,billing=1424342,gres/gpu=52
+   TRESBillingWeights=cpu=1369.560185,mem=304.3467078G,GRES/gpu=27391.2037
+";
+        let result = extract_tres_billing_weights(output);
+        assert_eq!(
+            result,
+            Some("cpu=1369.560185,mem=304.3467078G,GRES/gpu=27391.2037")
+        );
+    }
+
+    #[test]
+    fn test_extract_tres_billing_weights_not_confused_by_tres() {
+        // TRES= (without "Billing") must NOT match
+        let output = "\
+   TRES=cpu=960,mem=4320G,node=24,billing=1424342,gres/gpu=52
+   TRESBillingWeights=cpu=1369.560185,mem=304.3467078G,GRES/gpu=27391.2037
+";
+        let result = extract_tres_billing_weights(output);
+        assert!(result.unwrap().starts_with("cpu=1369"));
+    }
+
+    #[test]
+    fn test_extract_tres_billing_weights_last_line() {
+        let output = "PartitionName=standard\n   TRES=cpu=1920,mem=9600G,node=80\n   TRESBillingWeights=cpu=2900.462963,mem=414.3518519G";
+        let result = extract_tres_billing_weights(output);
+        assert_eq!(result, Some("cpu=2900.462963,mem=414.3518519G"));
+    }
+
+    #[test]
+    fn test_parse_billing_weights_high_precision() {
+        // 11+ significant digits
+        let w = parse_billing_weights(
+            "cpu=4519.67592593,mem=376.63966049G,GRES/gpu=18078.70370370",
+            true,
+        )
+        .unwrap();
+        assert!((w.cpu - 4519.67592593).abs() < 1e-6);
+        assert!((w.mem - 376.63966049).abs() < 1e-6);
+        assert!((w.gpu.unwrap() - 18078.70370370).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_parse_billing_weights_lowercase_keys() {
+        // All lowercase keys including gres/gpu
+        let w = parse_billing_weights(
+            "cpu=5631.481481,mem=1877.160494G,gres/gpu=28157.40741",
+            true,
+        )
+        .unwrap();
+        assert!((w.cpu - 5631.481481).abs() < 1e-4);
+        assert!((w.mem - 1877.160494).abs() < 1e-4);
+        assert!((w.gpu.unwrap() - 28157.40741).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_parse_billing_weights_mixed_case_gres() {
+        // GRES/gpu (uppercase) and gres/gpu (lowercase) must both parse
+        let gl =
+            parse_billing_weights("cpu=1369.560185,mem=304.3467078G,GRES/gpu=27391.2037", true)
+                .unwrap();
+        let armis = parse_billing_weights(
+            "cpu=5631.481481,mem=1877.160494G,gres/gpu=28157.40741",
+            true,
+        )
+        .unwrap();
+        assert!(gl.gpu.is_some());
+        assert!(armis.gpu.is_some());
+    }
+
+    #[test]
+    fn test_parse_billing_weights_no_gpu_high_precision() {
+        let w = parse_billing_weights("cpu=2504.62963,mem=357.8042328G", false).unwrap();
+        assert!((w.cpu - 2504.62963).abs() < 1e-4);
+        assert!((w.mem - 357.8042328).abs() < 1e-5);
+        assert!(w.gpu.is_none());
+    }
 }

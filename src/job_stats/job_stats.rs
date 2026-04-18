@@ -996,7 +996,7 @@ fn print_report(job: &JobData, auto_detected: bool) {
         }
     }
 
-    println!("{DIVIDER}\n");
+    println!("{DIVIDER}");
 }
 
 /// Format an RFC3339 or epoch timestamp for display (MM/DD/YYYY HH:MM:SS).
@@ -1523,5 +1523,304 @@ mod tests {
             resolve_script_path("sbatch -D /tmp/workdir run.sh", "/home/user"),
             Some("/home/user/run.sh".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_disk_io_with_steps() {
+        // batch + extern steps with disk I/O
+        let jv = serde_json::json!({
+            "steps": [
+                {
+                    "step": { "name": "batch" },
+                    "tres": {
+                        "requested": {
+                            "max": [
+                                { "type": "fs", "name": "disk", "count": 1048576_u64 }
+                            ]
+                        },
+                        "consumed": {
+                            "max": [
+                                { "type": "fs", "name": "disk", "count": 524288_u64 }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "step": { "name": "extern" },
+                    "tres": {
+                        "requested": {
+                            "max": [
+                                { "type": "fs", "name": "disk", "count": 0 }
+                            ]
+                        },
+                        "consumed": {
+                            "max": [
+                                { "type": "fs", "name": "disk", "count": 0 }
+                            ]
+                        }
+                    }
+                }
+            ]
+        });
+        let (read, write) = parse_disk_io(&jv);
+        assert_eq!(read, 1048576);
+        assert_eq!(write, 524288);
+    }
+
+    #[test]
+    fn test_parse_disk_io_no_steps() {
+        let jv = serde_json::json!({ "steps": [] });
+        let (read, write) = parse_disk_io(&jv);
+        assert_eq!(read, 0);
+        assert_eq!(write, 0);
+    }
+
+    #[test]
+    fn test_parse_disk_io_missing_steps() {
+        let jv = serde_json::json!({});
+        let (read, write) = parse_disk_io(&jv);
+        assert_eq!(read, 0);
+        assert_eq!(write, 0);
+    }
+
+    #[test]
+    fn test_parse_job_record_timeout_state() {
+        // TIMEOUT job with SIGTERM exit
+        let jv = serde_json::json!({
+            "job_id": 47421353,
+            "name": "ondemand/sys/dashboard/batch_connect/sys/ood_rstudio",
+            "user": "testuser",
+            "group": "testgrp",
+            "account": "testacct",
+            "partition": "standard",
+            "cluster": "greatlakes",
+            "nodes": "gl3100",
+            "allocation_nodes": 1,
+            "submit_line": "sbatch --parsable",
+            "working_directory": "/home/testuser",
+            "stdout_expanded": "/home/testuser/ondemand/output.log",
+            "stderr_expanded": "",
+            "state": { "current": ["TIMEOUT"], "reason": "TimeLimit" },
+            "exit_code": {
+                "return_code": { "number": 0, "set": true, "infinite": false },
+                "signal": { "id": { "number": 15, "set": true, "infinite": false }, "name": "SIGTERM" },
+                "status": ["SIGNALED"]
+            },
+            "required": {
+                "CPUs": 1,
+                "memory_per_cpu": { "number": 0, "set": false, "infinite": false },
+                "memory_per_node": { "number": 5120, "set": true, "infinite": false }
+            },
+            "array": {
+                "job_id": 0,
+                "task_id": { "number": 0, "set": false, "infinite": false }
+            },
+            "time": {
+                "submission": 1744200000_u64,
+                "start": 1744200010_u64,
+                "end": 1744243200_u64,
+                "elapsed": 43190,
+                "limit": { "number": 720, "set": true, "infinite": false },
+                "total": { "seconds": 100, "microseconds": 500000 },
+                "system": { "seconds": 10, "microseconds": 0 },
+                "user": { "seconds": 90, "microseconds": 500000 }
+            },
+            "tres": {
+                "allocated": [
+                    { "type": "cpu", "count": 1 },
+                    { "type": "billing", "count": 2504 },
+                    { "type": "mem", "count": 5368709120_u64 },
+                    { "type": "node", "count": 1 }
+                ]
+            },
+            "steps": [
+                {
+                    "step": { "name": "batch" },
+                    "tres": {
+                        "requested": {
+                            "max": [
+                                { "type": "mem", "count": 268435456_u64 }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "step": { "name": "extern" },
+                    "tres": {
+                        "requested": {
+                            "max": [
+                                { "type": "mem", "count": 1048576_u64 }
+                            ]
+                        }
+                    }
+                }
+            ]
+        });
+        let job = parse_job_record(&jv).unwrap();
+        assert_eq!(job.state, "TIMEOUT");
+        assert_eq!(job.exit_code, "0:15");
+        assert_eq!(job.elapsed_secs, 43190);
+        assert_eq!(job.walltime_requested_secs, 720 * 60);
+        assert_eq!(job.req_mem_bytes, 5120 * 1024 * 1024);
+        assert_eq!(job.max_rss_bytes, 268435456);
+        assert_eq!(job.total_cpu_secs, 101);
+        assert_eq!(job.user_cpu_secs, 91);
+        assert!((job.billing - 2504.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_job_record_failed_nonzero_return() {
+        let jv = serde_json::json!({
+            "job_id": 14464136,
+            "name": "failed_job",
+            "user": "testuser",
+            "group": "testgrp",
+            "account": "testacct",
+            "partition": "gpu",
+            "cluster": "armis2",
+            "nodes": "armis20108",
+            "allocation_nodes": 1,
+            "submit_line": "sbatch -D /scratch/workdir --export NONE --parsable -M armis2",
+            "working_directory": "/scratch/workdir",
+            "stdout_expanded": "/scratch/workdir/out.log",
+            "stderr_expanded": "/scratch/workdir/err.log",
+            "state": { "current": ["FAILED"], "reason": "NonZeroExitCode" },
+            "exit_code": {
+                "return_code": { "number": 1, "set": true, "infinite": false },
+                "signal": { "id": { "number": 0, "set": false, "infinite": false }, "name": "" },
+                "status": ["FAILED"]
+            },
+            "required": {
+                "CPUs": 8,
+                "memory_per_cpu": { "number": 8192, "set": true, "infinite": false },
+                "memory_per_node": { "number": 0, "set": false, "infinite": false }
+            },
+            "array": {
+                "job_id": 0,
+                "task_id": { "number": 0, "set": false, "infinite": false }
+            },
+            "time": {
+                "submission": 1743000000_u64,
+                "start": 1743000005_u64,
+                "end": 1743000015_u64,
+                "elapsed": 10,
+                "limit": { "number": 60, "set": true, "infinite": false },
+                "total": { "seconds": 0, "microseconds": 400000 },
+                "system": { "seconds": 0, "microseconds": 200000 },
+                "user": { "seconds": 0, "microseconds": 200000 }
+            },
+            "tres": {
+                "allocated": [
+                    { "type": "cpu", "count": 8 },
+                    { "type": "billing", "count": 120138 },
+                    { "type": "mem", "count": 68719476736_u64 },
+                    { "type": "gres/gpu", "count": 1 }
+                ]
+            },
+            "steps": []
+        });
+        let job = parse_job_record(&jv).unwrap();
+        assert_eq!(job.state, "FAILED");
+        assert_eq!(job.exit_code, "1");
+        assert_eq!(job.alloc_cpus, 8);
+        assert_eq!(job.req_mem_bytes, 8192 * 1024 * 1024 * 8);
+        assert!(job.req_mem_per_cpu);
+        assert_eq!(job.total_cpu_secs, 0);
+        assert_eq!(job.user_cpu_secs, 0);
+        assert_eq!(job.system_cpu_secs, 0);
+    }
+
+    #[test]
+    fn test_parse_max_rss_multi_step() {
+        let jv = serde_json::json!({
+            "steps": [
+                {
+                    "step": { "name": "batch" },
+                    "tres": {
+                        "requested": {
+                            "max": [
+                                { "type": "mem", "count": 500000000_u64 }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "step": { "name": "extern" },
+                    "tres": {
+                        "requested": {
+                            "max": [
+                                { "type": "mem", "count": 1048576_u64 }
+                            ]
+                        }
+                    }
+                }
+            ]
+        });
+        let rss = parse_max_rss(&jv);
+        assert_eq!(rss, 500000000);
+    }
+
+    #[test]
+    fn test_resolve_script_path_ondemand_submit_line() {
+        // "sbatch --parsable" has no script
+        assert_eq!(resolve_script_path("sbatch --parsable", "/home/user"), None);
+    }
+
+    #[test]
+    fn test_resolve_script_path_armis2_complex() {
+        assert_eq!(
+            resolve_script_path(
+                "sbatch -D /work/dir --export NONE --parsable -M armis2",
+                "/home/user"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sub_second_cpu_time_rounding() {
+        // 499999µs rounds to 0s, not 1s
+        let jv = serde_json::json!({
+            "job_id": 999,
+            "name": "fast",
+            "user": "u",
+            "group": "g",
+            "account": "a",
+            "partition": "standard",
+            "cluster": "c",
+            "nodes": "n1",
+            "allocation_nodes": 1,
+            "submit_line": "",
+            "stdout_expanded": "",
+            "stderr_expanded": "",
+            "state": { "current": ["COMPLETED"] },
+            "exit_code": {
+                "return_code": { "number": 0, "set": true, "infinite": false },
+                "signal": { "id": { "number": 0, "set": false, "infinite": false }, "name": "" },
+                "status": ["SUCCESS"]
+            },
+            "required": {
+                "CPUs": 1,
+                "memory_per_cpu": { "number": 0, "set": false, "infinite": false },
+                "memory_per_node": { "number": 100, "set": true, "infinite": false }
+            },
+            "array": { "job_id": 0, "task_id": { "number": 0, "set": false, "infinite": false } },
+            "time": {
+                "submission": 1000_u64,
+                "start": 1000_u64,
+                "end": 1001_u64,
+                "elapsed": 1,
+                "limit": { "number": 1, "set": true, "infinite": false },
+                "total": { "seconds": 0, "microseconds": 499999 },
+                "system": { "seconds": 0, "microseconds": 100000 },
+                "user": { "seconds": 0, "microseconds": 399999 }
+            },
+            "tres": { "allocated": [] },
+            "steps": []
+        });
+        let job = parse_job_record(&jv).unwrap();
+        assert_eq!(job.total_cpu_secs, 0);
+        assert_eq!(job.user_cpu_secs, 0);
+        assert_eq!(job.system_cpu_secs, 0);
     }
 }

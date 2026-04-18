@@ -216,4 +216,44 @@ mod tests {
         print_wide(&rows);
         print_narrow(&rows);
     }
+
+    #[test]
+    fn short_rows_filtered_out() {
+        let rows: Vec<Vec<&str>> = vec![
+            vec!["testacct", "testuser", "greatlakes"], // too short
+            vec![
+                "greatlakes",
+                "testacct",
+                "cpu=500",
+                "billing=50000000",
+                "1000",
+                "cpu=100",
+                "2000",
+                "7-00:00:00",
+                "normal",
+            ],
+        ];
+        let filtered: Vec<_> = rows.iter().filter(|r| r.len() >= 9).collect();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0][1], "testacct");
+    }
+
+    #[test]
+    fn print_wide_skips_short_rows() {
+        let rows = vec![
+            vec!["too", "short"],
+            vec![
+                "greatlakes",
+                "testacct",
+                "cpu=500",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "normal",
+            ],
+        ];
+        print_wide(&rows);
+    }
 }

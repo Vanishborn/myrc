@@ -275,6 +275,7 @@ pub async fn slurm_cmd(args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String, M
         .args(&args[1..])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| MyrcError::SlurmCmd {
             message: format!("failed to spawn {:?}: {e}", args[0].as_ref()),
@@ -298,8 +299,6 @@ pub async fn slurm_cmd(args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String, M
         }
         Ok(Err(io_err)) => Err(MyrcError::Io(io_err)),
         Err(_elapsed) => {
-            // Timeout: the child is dropped here, which kills it automatically
-            // when using tokio::process::Child (it sends SIGKILL on drop)
             tracing::error!(cmd = %cmd_str.join(" "), timeout_s = timeout.as_secs(), "command timed out");
             Err(MyrcError::SlurmCmd {
                 message: format!("command timed out after {}s", timeout.as_secs()),

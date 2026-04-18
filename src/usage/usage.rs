@@ -51,7 +51,7 @@ struct UsageRow {
     usage_dollars: f64,
 }
 
-pub fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
+pub async fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
     // Lighthouse exclusion
     let cluster = ClusterEnv::from_env().ok();
     if let Some(ref c) = cluster {
@@ -106,7 +106,7 @@ pub fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
         "format=account,login,used".to_string(),
     ];
 
-    // Single sync call via a minimal tokio runtime
+    // Single async call to sreport
     let mut spinner_group = SpinnerGroup::new();
     let spinner = if !output_mode.is_json() {
         let sp = spinner_group.add(SpinnerKind::Total, "Querying:");
@@ -116,11 +116,7 @@ pub fn run(args: &Args, output_mode: OutputMode) -> Result<()> {
         None
     };
 
-    let output = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(slurm_cmd(&cmd_args))
-        .context("querying usage")?;
+    let output = slurm_cmd(&cmd_args).await.context("querying usage")?;
 
     if let Some(ref sp) = spinner {
         sp.set_message("done");
@@ -260,5 +256,47 @@ mod tests {
         let divisor: u64 = 100_000;
         let dollars = raw as f64 / divisor as f64;
         assert!((dollars - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_sreport_no_trailing_pipe() {
+        let output = "testacct|testuser|3240113\notheracct|testuser|500000\n";
+        let rows = parse_slurm_kv(output);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], "testacct");
+        assert_eq!(rows[0][2], "3240113");
+    }
+
+    #[test]
+    fn parse_sreport_empty_output() {
+        let output = "";
+        let rows = parse_slurm_kv(output);
+        let parsed: Vec<(&str, &str, u64)> = rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .filter_map(|r| {
+                let raw: u64 = r[2].trim().parse().ok()?;
+                Some((r[0], r[1], raw))
+            })
+            .collect();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_sreport_malformed_row_skipped() {
+        // Row with only 2 fields + row with non-numeric usage
+        let output = "acct|user\nacct2|user2|notanumber\nacct3|user3|999\n";
+        let rows = parse_slurm_kv(output);
+        let parsed: Vec<(&str, &str, u64)> = rows
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .filter_map(|r| {
+                let raw: u64 = r[2].trim().parse().ok()?;
+                Some((r[0], r[1], raw))
+            })
+            .collect();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "acct3");
+        assert_eq!(parsed[0].2, 999);
     }
 }

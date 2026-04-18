@@ -417,4 +417,63 @@ mod tests {
         assert_eq!(format_mem_gib(10 * (1 << 30)), "10 GiB");
         assert_eq!(format_mem_gib(512 * (1 << 20)), "0.500 GiB");
     }
+
+    #[test]
+    fn parse_scontrol_job_with_billing_field() {
+        // ReqTRES has billing= interspersed, no GPU
+        let output = r#"
+   JobId=47992429 JobName=test_job
+   UserId=testuser(114354474) GroupId=arc-ts(67890) MCS_label=N/A
+   Priority=4294901660 Nice=0 Account=testacct QOS=normal
+   ReqTRES=cpu=1,mem=5G,node=1,billing=2504
+   AllocTRES=cpu=1,mem=5G,node=1,billing=2504
+"#;
+        let (user, nodes, cores, gpus, mem) = parse_scontrol_job(output);
+        assert_eq!(user, "testuser");
+        assert_eq!(nodes, 1);
+        assert_eq!(cores, 1);
+        assert_eq!(gpus, 0);
+        assert_eq!(mem, 5 * (1 << 30));
+    }
+
+    #[test]
+    fn parse_scontrol_job_armis2_gpu_with_billing() {
+        // billing + gres/gpu together, large UID
+        let output = r#"
+   JobId=14656403 JobName=gpu_job
+   UserId=testuser(937974) GroupId=testgrp(1234)
+   ReqTRES=cpu=8,mem=64G,node=1,billing=120138,gres/gpu=1
+   AllocTRES=cpu=8,mem=64G,node=1,billing=120138,gres/gpu=1
+   TresPerJob=gres/gpu:1
+   TresPerTask=cpu=8
+   MailUser=testuser@umich.edu MailType=BEGIN,END,FAIL
+"#;
+        let (user, nodes, cores, gpus, mem) = parse_scontrol_job(output);
+        assert_eq!(user, "testuser");
+        assert_eq!(cores, 8);
+        assert_eq!(gpus, 1);
+        assert_eq!(nodes, 1);
+        assert_eq!(mem, 64 * (1 << 30));
+    }
+
+    #[test]
+    fn parse_scontrol_job_alloc_tres_not_double_counted() {
+        let output = r#"
+   UserId=jdoe(12345)
+   ReqTRES=cpu=4,mem=8G,node=1,gres/gpu=2
+   AllocTRES=cpu=4,mem=8G,node=1,gres/gpu=2
+"#;
+        let (_, _, cores, gpus, _) = parse_scontrol_job(output);
+        // Should parse ReqTRES only
+        assert_eq!(cores, 4);
+        assert_eq!(gpus, 2);
+    }
+
+    #[test]
+    fn parse_scontrol_job_userid_9_digit_uid() {
+        let output =
+            "   UserId=testuser(114354474) GroupId=arc-ts(67890)\n   ReqTRES=cpu=1,mem=1G,node=1\n";
+        let (user, _, _, _, _) = parse_scontrol_job(output);
+        assert_eq!(user, "testuser");
+    }
 }

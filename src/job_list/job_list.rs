@@ -342,7 +342,11 @@ fn truncate_name(name: &str, max: usize) -> String {
     if name.len() <= max {
         name.to_string()
     } else {
-        format!("{}...", &name[..max - 3])
+        let mut end = max - 3;
+        while end > 0 && !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &name[..end])
     }
 }
 
@@ -657,5 +661,93 @@ mod tests {
         let (start, end) = build_date_range(&args).unwrap();
         assert_eq!(start, "2026-04-30");
         assert_eq!(end, "2026-04-30");
+    }
+
+    #[test]
+    fn test_truncate_name_multibyte_utf8() {
+        // Simplified Chinese: must not panic on multi-byte chars
+        let name = "机器学习训练任务测试";
+        let result = truncate_name(name, 20);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_name_emoji() {
+        let name = "🔬experiment_with_long_name";
+        let result = truncate_name(name, 15);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 18);
+    }
+
+    #[test]
+    fn test_truncate_name_ascii_boundary() {
+        assert_eq!(truncate_name("short", 20), "short");
+        assert_eq!(
+            truncate_name("a_very_long_job_name_here", 20),
+            "a_very_long_job_n..."
+        );
+    }
+
+    #[test]
+    fn test_sort_jobs_by_id_array_job() {
+        // Array job IDs should sort by base ID
+        let mut jobs = vec![
+            JobRow {
+                job_id: "48132109_3".into(),
+                job_name: "array".into(),
+                account: "x".into(),
+                state: "COMPLETED".into(),
+                submit: "2026-01-01".into(),
+                start: "2026-01-01".into(),
+                end: "2026-01-01".into(),
+                elapsed: "00:01:00".into(),
+                alloc_cpus: "1".into(),
+                req_mem: "1Gn".into(),
+            },
+            JobRow {
+                job_id: "48188716_[0-13]".into(),
+                job_name: "pending_array".into(),
+                account: "x".into(),
+                state: "PENDING".into(),
+                submit: "2026-01-02".into(),
+                start: "Unknown".into(),
+                end: "Unknown".into(),
+                elapsed: "00:00:00".into(),
+                alloc_cpus: "4".into(),
+                req_mem: "4Gn".into(),
+            },
+            JobRow {
+                job_id: "100".into(),
+                job_name: "simple".into(),
+                account: "x".into(),
+                state: "COMPLETED".into(),
+                submit: "2025-12-01".into(),
+                start: "2025-12-01".into(),
+                end: "2025-12-01".into(),
+                elapsed: "00:00:30".into(),
+                alloc_cpus: "1".into(),
+                req_mem: "1Gn".into(),
+            },
+        ];
+        sort_jobs(&mut jobs, "id", false);
+        // Descending: 48188716 > 48132109 > 100
+        assert_eq!(jobs[0].job_id, "48188716_[0-13]");
+        assert_eq!(jobs[1].job_id, "48132109_3");
+        assert_eq!(jobs[2].job_id, "100");
+    }
+
+    #[test]
+    fn test_parse_req_mem_bytes_variants() {
+        assert_eq!(parse_req_mem_bytes("5Gn"), 5 * (1 << 30));
+        assert_eq!(parse_req_mem_bytes("64Gn"), 64 * (1 << 30));
+        assert_eq!(parse_req_mem_bytes("1Tc"), 1u64 << 40);
+        assert_eq!(parse_req_mem_bytes("512Kn"), 512 * (1 << 10));
+    }
+
+    #[test]
+    fn test_parse_elapsed_with_days() {
+        assert_eq!(parse_elapsed_to_secs("2-00:00:00"), 172800);
+        assert_eq!(parse_elapsed_to_secs("0-01:00:00"), 3600);
+        assert_eq!(parse_elapsed_to_secs("00:00:00"), 0);
     }
 }
