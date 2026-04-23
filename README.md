@@ -139,10 +139,15 @@ Set up a personal Lmod module directory.
 
 Per-node cluster resource dashboard (CPU, memory, GPU allocation and availability).
 
-| Flag              | Description                                                         |
-| ----------------- | ------------------------------------------------------------------- |
-| `-p, --partition` | Filter to a specific partition                                      |
-| `--raw`           | Show raw availability (disable bottleneck rule and state filtering) |
+| Flag               | Description                                                         |
+| ------------------ | ------------------------------------------------------------------- |
+| `-p, --partition`  | Filter to a specific partition                                      |
+| `--raw`            | Show raw availability (disable bottleneck rule and state filtering) |
+| `--sort-by-state`  | Sort by state tier (IDLE first, DOWN last)                          |
+| `-r, --reverse`    | Reverse the sort order (requires `--sort-by-state`)                 |
+| `-s, --state`      | Filter by state (comma-separated, case-insensitive)                 |
+| `--no-gpu`         | Hide GPU columns                                                    |
+| `-n, --node`       | Filter by node name (prefix or glob)                                |
 
 ### `myrc completions <SHELL>`
 

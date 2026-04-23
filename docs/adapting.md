@@ -102,7 +102,6 @@ GPU validation checks whether the partition name contains `"gpu"`. If your GPU p
 | --------------------- | -------- | ----------------------------- | ------------------------------------------------ |
 | `$CLUSTER_NAME`       | Yes      | (none)                        | Identifies the current cluster                   |
 | `$MYRC_ETC_DIR`       | No       | `/sw/pkgs/arc/usertools/etc/` | Maintenance epoch file directory                 |
-| `$MYRC_SLURM_TIMEOUT` | No       | 30 (seconds)                  | Per-subprocess timeout                           |
 | `$MY_ACCOUNT_DIVISOR` | No       | (computed from date)          | Override billing divisor                         |
 | `$USER`               | No       | (system)                      | Fallback for current username                    |
 | `$HOME`               | No       | (system)                      | Lmod module directory base                       |
@@ -139,12 +138,12 @@ Everything else (table rendering, JSON output, concurrency, spinners, date valid
 
 The truecolor palette in `src/common/common.rs` is derived from the [U-M Brand Color Guidelines](https://brand.umich.edu/design-resources/colors/). If your institution has its own brand colors, update the RGB values in the five `color_*()` functions:
 
-| Function         | Role    | Default (U-M)                |
-| ---------------- | ------- | ---------------------------- |
-| `color_error()`  | Error   | `#c8352a` / red fallback     |
-| `color_warning()`| Warning | `#e27328` / yellow fallback  |
-| `color_success()`| Success | `#5ba84f` / green fallback   |
-| `color_info()`   | Info    | `#4f95c9` / cyan fallback    |
-| `color_dim()`    | Dim     | `#8e9094` / dimmed fallback  |
+| Function           | Role    | Default (U-M)                |
+| ------------------ | ------- | ---------------------------- |
+| `color_error()`    | Error   | `#c8352a` / red fallback     |
+| `color_warning()`  | Warning | `#e27328` / yellow fallback  |
+| `color_success()`  | Success | `#5ba84f` / green fallback   |
+| `color_info()`     | Info    | `#4f95c9` / cyan fallback    |
+| `color_dim()`      | Dim     | `#8e9094` / dimmed fallback  |
 
 The ANSI-16 fallbacks (used when `$COLORTERM` is not `truecolor`/`24bit`) are standard terminal colors and generally do not need changing. The `colored` crate respects `NO_COLOR` automatically.

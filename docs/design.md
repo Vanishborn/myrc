@@ -1,7 +1,7 @@
 # myrc Design Document
 
 > Authoritative architectural reference for the `myrc` CLI toolkit.
-> Current as of v0.3.1.
+> Current as of v0.4.0.
 > Covers naming, project structure, module contracts, concurrency patterns,
 > terminal aesthetics, dependencies, build, and deployment.
 > Consult this document before writing or reviewing any code.
@@ -195,14 +195,13 @@ Shared infrastructure used across subcommands. These utilities enforce aesthetic
 
 ### 4.1 Slurm I/O
 
-| Component              | Description                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `slurm_cmd()`          | Async subprocess runner with 30s timeout. Returns `Result<String, MyrcError>` |
-| `slurm_cmd_parallel()` | Fans out N `slurm_cmd` calls via `JoinSet`, capped at 12 concurrent           |
-| `parse_slurm_kv()`     | Parses `sacctmgr -P`/`sreport -P` pipe-delimited output into `Vec<Vec<&str>>` |
+| Component              | Description                                                                             |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `slurm_cmd()`          | Async subprocess runner with `.kill_on_drop(true)`. Returns `Result<String, MyrcError>` |
+| `slurm_cmd_parallel()` | Fans out N `slurm_cmd` calls via `JoinSet`, capped at 12 concurrent                     |
+| `parse_slurm_kv()`     | Parses `sacctmgr -P`/`sreport -P` pipe-delimited output into `Vec<Vec<&str>>`           |
 
-**Timeout:** Each `slurm_cmd()` call has a **30-second** per-subprocess timeout (safety net for hung Slurm daemons). Override via `$MYRC_SLURM_TIMEOUT` (seconds).
-On timeout, the child process is killed and `MyrcError::SlurmCmd` is returned with exit code 69 (service unavailable).
+Subprocesses run without a timeout. Ctrl+C cleanup is handled by `.kill_on_drop(true)`. If slurmctld is unresponsive, the connection fails with an I/O error rather than hanging indefinitely.
 
 **Concurrency cap:** `slurm_cmd_parallel()` uses a `tokio::sync::Semaphore` with **12 permits** to avoid flooding the Slurm RPC endpoint on shared login nodes. This is separate from Slurm's server-side rate limiting; it's a client-side courtesy to avoid monopolizing RPC slots.
 
@@ -261,7 +260,6 @@ use tokio::sync::Semaphore;
 use std::sync::Arc;
 
 const MAX_CONCURRENT: usize = 12;
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 pub async fn slurm_cmd_parallel(cmds: Vec<Vec<String>>) -> Result<Vec<String>> {
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
@@ -606,11 +604,14 @@ Fields sourced from `sacct --json` (Slurm 25+):
 
 |             |                                                                                                            |
 | ----------- | ---------------------------------------------------------------------------------------------------------- |
-| **Command** | `myrc sstate [-p PARTITION] [--raw]`                                                                       |
+| **Command** | `myrc sstate [-p PARTITION] [--raw] [--sort-by-state] [-r] [-s STATE] [--no-gpu] [-n NODE]`                |
 | **Runtime** | tokio                                                                                                      |
-| **Calls**   | `scontrol show node -o` or `sinfo -N ...`                                                                  |
+| **Calls**   | `scontrol show node -o`, `scontrol show partition`                                                         |
 | **Notes**   | Per-node resource dashboard: CPU/mem/GPU alloc + avail + percent + load + state. Totals row.               |
 |             | `--raw` disables bottleneck rule and state filtering. Node state and bottleneck avail cells colored (§5.3) |
+|             | `--sort-by-state` sorts by tier: IDLE → normal → warning → error. `-r` reverses.                           |
+|             | `-s`/`--state` filters by state (comma-separated, case-insensitive). `--no-gpu` hides GPU columns.         |
+|             | `-n`/`--node` filters by node name prefix or glob pattern.                                                 |
 
 ---
 
@@ -631,7 +632,7 @@ Tokio is used selectively. Subcommands that benefit from async I/O enter the run
 
 ### 7.1 Signal Handling & Graceful Shutdown
 
-Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`tail` exits cleanly. Ctrl+C terminates the process group, which also kills spawned child processes. All async subprocesses use `.kill_on_drop(true)` to ensure child processes are cleaned up when a timeout fires or the future is cancelled.
+Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`tail` exits cleanly. Ctrl+C terminates the process group, which also kills spawned child processes. All async subprocesses use `.kill_on_drop(true)` to ensure child processes are cleaned up when the future is cancelled.
 
 ---
 
@@ -640,7 +641,7 @@ Currently, `SIGPIPE` is reset to `SIG_DFL` in `main()` so piping into `head`/`ta
 ```toml
 [package]
 name = "myrc"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -657,7 +658,7 @@ path = "bin/main.rs"
 clap = { version = "4", features = ["derive", "wrap_help", "color"] }
 clap_complete = "4"
 clap_mangen = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "process", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
@@ -788,10 +789,10 @@ Versions follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`):
 - `MINOR`: new subcommands, new flags, new JSON fields (backward-compatible)
 - `PATCH`: bug fixes, performance improvements, output formatting tweaks
 
-The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
+The canonical version lives in `Cargo.toml` (`version = "X.Y.Z"`). Git tags (`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`, `v0.4.0`, etc.) mark releases. `shadow-rs` embeds the build target into `--version` so deployed binaries are always traceable:
 
 ```zsh
-myrc 0.3.1
+myrc 0.4.0
 Author: Haoran "Henry" Li @ University of Michigan
 Target: x86_64-unknown-linux-gnu
 ```
@@ -916,11 +917,10 @@ Return `Result` from all module `run()` functions. `MyrcError` carries an `exit_
 
 - **`human-panic`** is initialized in `main()`. Panics write a crash report to a temp file instead of dumping a raw backtrace to the terminal.
 - **Error context** is provided via `anyhow`'s `.context()` method, producing cause chains like `"querying billing for {account}"`.
-- **`$MYRC_SLURM_TIMEOUT`** overrides the default 30-second per-subprocess timeout for debugging slow Slurm daemons.
 - **Structured logging** via `tracing` + `tracing-subscriber`, controlled by the global `-v` flag:
   - Default (no flag): warnings only
   - `-v`: info; shows user/account resolution, parallel fanout counts
-  - `-vv`: debug; shows every Slurm command spawned with args and timeout
+  - `-vv`: debug; shows every Slurm command spawned with args
   - `-vvv`: trace; shows command output sizes and full resolution detail
   - `$MYRC_LOG` overrides the flag-based level (e.g., `MYRC_LOG=trace`). All log output goes to stderr.
 
@@ -970,7 +970,7 @@ Items deferred from v0.1.0. Revisit after all current modules are stable.
 | --- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | T-1 | `modules setup`     | Template selection menu: offer hello/python-venv/conda/custom starters                                                                                                                                                                                                                              |
 | T-2 | `grufi`             | Full Rust rewrite of GUFI storage analysis tooling                                                                                                                                                                                                                                                  |
-| T-3 | Timeout tuning      | Tune 30s timeout and 12-concurrent cap based on production experience (§4.1, §7)                                                                                                                                                                                                                    |
+| T-3 | Concurrency tuning  | Tune 12-concurrent cap based on production experience (§7)                                                                                                                                                                                                                                          |
 | T-4 | JSON schema freeze  | Version-stamp and freeze JSON schemas for machine-consumer stability. Post-v0.1.0 after real usage stabilizes schemas                                                                                                                                                                               |
 | T-5 | Dynamic completions | Add custom `clap_complete` completers for flags that accept Slurm-queryable values: `-a` (accounts via `sacctmgr`), `-p` (partitions via `scontrol`). Each tab press runs a live Slurm query (~100–500ms). Only functional on cluster nodes                                                         |
 | T-6 | Array job handling  | `job stats`: detect when `sacct --json -j BASE_ID` returns multiple array tasks and warn instead of silently taking the first. Show `array_job_id`/`array_task_id` in `print_report` title when set. `job header`: add `SLURM_ARRAY_JOB_ID` and `SLURM_ARRAY_TASK_ID` to the displayed env var list |

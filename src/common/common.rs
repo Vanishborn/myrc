@@ -1,19 +1,15 @@
+use chrono::{Datelike, NaiveDate};
+use colored::{ColoredString, Colorize};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::env;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-
-use chrono::{Datelike, NaiveDate};
-use colored::{ColoredString, Colorize};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-
-/// Default per-subprocess timeout in seconds.
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum concurrent Slurm subprocess calls (semaphore permits).
 const MAX_CONCURRENT: usize = 12;
@@ -249,27 +245,15 @@ impl TerminalInfo {
     }
 }
 
-/// Read timeout override from `$MYRC_SLURM_TIMEOUT`, falling back to 30s.
-fn slurm_timeout() -> Duration {
-    env::var("MYRC_SLURM_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-}
-
-/// Run a single Slurm CLI command asynchronously with a 30s timeout.
+/// Run a single Slurm CLI command asynchronously.
 ///
-/// On timeout the child process is killed and `MyrcError::SlurmCmd` is returned
-/// with exit code 69 (service unavailable).
+/// The child process has `.kill_on_drop(true)` with automatic Ctrl+C cleanup.
 pub async fn slurm_cmd(args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String, MyrcError> {
-    let timeout = slurm_timeout();
-
     let cmd_str: Vec<String> = args
         .iter()
         .map(|a| a.as_ref().to_string_lossy().into_owned())
         .collect();
-    tracing::debug!(cmd = %cmd_str.join(" "), timeout_s = timeout.as_secs(), "spawning slurm command");
+    tracing::debug!(cmd = %cmd_str.join(" "), "spawning slurm command");
 
     let child = Command::new(&args[0])
         .args(&args[1..])
@@ -282,29 +266,18 @@ pub async fn slurm_cmd(args: &[impl AsRef<std::ffi::OsStr>]) -> Result<String, M
             exit_code: ExitCode::ServiceUnavailable,
         })?;
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                tracing::trace!(cmd = %cmd_str.join(" "), bytes = stdout.len(), "command succeeded");
-                Ok(stdout)
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!(cmd = %cmd_str.join(" "), status = ?output.status, "command failed");
-                Err(MyrcError::SlurmCmd {
-                    message: stderr.trim().to_string(),
-                    exit_code: ExitCode::Failure,
-                })
-            }
-        }
-        Ok(Err(io_err)) => Err(MyrcError::Io(io_err)),
-        Err(_elapsed) => {
-            tracing::error!(cmd = %cmd_str.join(" "), timeout_s = timeout.as_secs(), "command timed out");
-            Err(MyrcError::SlurmCmd {
-                message: format!("command timed out after {}s", timeout.as_secs()),
-                exit_code: ExitCode::ServiceUnavailable,
-            })
-        }
+    let output = child.wait_with_output().await.map_err(MyrcError::Io)?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        tracing::trace!(cmd = %cmd_str.join(" "), bytes = stdout.len(), "command succeeded");
+        Ok(stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(cmd = %cmd_str.join(" "), status = ?output.status, "command failed");
+        Err(MyrcError::SlurmCmd {
+            message: stderr.trim().to_string(),
+            exit_code: ExitCode::Failure,
+        })
     }
 }
 

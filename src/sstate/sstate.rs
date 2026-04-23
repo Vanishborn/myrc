@@ -16,6 +16,26 @@ pub struct Args {
     /// Show raw availability (disable bottleneck rule and state filtering).
     #[arg(long = "raw")]
     pub raw: bool,
+
+    /// Sort nodes by state tier (IDLE first, DOWN last), then by name.
+    #[arg(long = "sort-by-state")]
+    pub sort_by_state: bool,
+
+    /// Reverse the sort order (requires --sort-by-state).
+    #[arg(short = 'r', long = "reverse", requires = "sort_by_state")]
+    pub reverse: bool,
+
+    /// Filter nodes by state (comma-separated, case-insensitive).
+    #[arg(short = 's', long = "state")]
+    pub state: Option<String>,
+
+    /// Hide GPU columns.
+    #[arg(long = "no-gpu")]
+    pub no_gpu: bool,
+
+    /// Filter nodes by name (prefix or glob with *).
+    #[arg(short = 'n', long = "node")]
+    pub node: Option<String>,
 }
 
 /// Parsed per-node resource data.
@@ -141,7 +161,7 @@ pub async fn run(args: &Args, mode: OutputMode) -> Result<()> {
     let all_nodes = parse_node_output(&node_output);
 
     // Filter to partition nodes if specified
-    let nodes: Vec<NodeInfo> = if let Some(pnodes) = &partition_nodes {
+    let mut nodes: Vec<NodeInfo> = if let Some(pnodes) = &partition_nodes {
         all_nodes
             .into_iter()
             .filter(|n| pnodes.contains(&n.name))
@@ -149,6 +169,34 @@ pub async fn run(args: &Args, mode: OutputMode) -> Result<()> {
     } else {
         all_nodes
     };
+
+    // Filter by node name (prefix or glob)
+    if let Some(pattern) = &args.node {
+        nodes = filter_nodes_by_name(nodes, pattern);
+    }
+
+    // Filter by state
+    if let Some(state_filter) = &args.state {
+        let states: Vec<String> = state_filter
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .collect();
+        nodes.retain(|n| {
+            n.state
+                .split('+')
+                .any(|flag| states.iter().any(|s| s == flag))
+        });
+    }
+
+    // Sort by state tier
+    if args.sort_by_state {
+        nodes.sort_by(|a, b| {
+            let ta = state_tier(&a.state);
+            let tb = state_tier(&b.state);
+            let cmp = ta.cmp(&tb).then_with(|| a.name.cmp(&b.name));
+            if args.reverse { cmp.reverse() } else { cmp }
+        });
+    }
 
     if nodes.is_empty() {
         if let Some(part) = &args.partition {
@@ -161,11 +209,12 @@ pub async fn run(args: &Args, mode: OutputMode) -> Result<()> {
 
     // Determine if any node in the set has GPUs
     let any_gpus = nodes.iter().any(|n| n.has_gpus);
+    let show_gpu = any_gpus && !args.no_gpu;
 
     if mode.is_json() {
-        print_json(&cluster, args, &nodes, any_gpus, args.raw)?;
+        print_json(&cluster, args, &nodes, show_gpu, args.raw)?;
     } else {
-        print_table(&nodes, any_gpus, args.raw);
+        print_table(&nodes, show_gpu, args.raw);
     }
 
     Ok(())
@@ -387,8 +436,8 @@ fn parse_alloc_tres_gpu(s: &str) -> u64 {
     0
 }
 
-fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
-    let headers: Vec<&str> = vec![
+fn print_table(nodes: &[NodeInfo], show_gpu: bool, raw: bool) {
+    let mut headers: Vec<&str> = vec![
         "Node",
         "AllocCPU",
         "AvailCPU",
@@ -399,16 +448,20 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
         "AvailMem",
         "TotalMem",
         "PercentUsedMem",
-        "AllocGPU",
-        "AvailGPU",
-        "TotalGPU",
-        "PercentUsedGPU",
-        "NodeState",
     ];
+    if show_gpu {
+        headers.extend(["AllocGPU", "AvailGPU", "TotalGPU", "PercentUsedGPU"]);
+    }
+    headers.push("NodeState");
+
+    let col_avail_cpu = 2;
+    let col_avail_mem = 7;
+    let col_avail_gpu = if show_gpu { Some(11) } else { None };
+    let col_state = if show_gpu { 14 } else { 10 };
 
     let mut table = Table::from_headers(&headers);
-    // Right-align numeric columns
-    for i in 1..14 {
+    let num_numeric = headers.len() - 2;
+    for i in 1..=num_numeric {
         table.right_align(i);
     }
 
@@ -424,23 +477,7 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
             n.effective_avail_mem_bytes()
         };
 
-        let (gpu_alloc, gpu_avail, gpu_total, gpu_pct) = if n.has_gpus {
-            let avail = if raw {
-                n.avail_gpus()
-            } else {
-                n.effective_avail_gpus()
-            };
-            (
-                n.alloc_gpus.to_string(),
-                avail.to_string(),
-                n.total_gpus.to_string(),
-                format!("{:.2}", n.percent_used_gpu()),
-            )
-        } else {
-            ("N/A".into(), "N/A".into(), "N/A".into(), "N/A".into())
-        };
-
-        table.add_row(vec![
+        let mut row = vec![
             n.name.clone(),
             n.alloc_cpus.to_string(),
             avail_cpu.to_string(),
@@ -451,12 +488,28 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
             format_memory(avail_mem),
             format_memory(n.total_mem_bytes),
             format!("{:.2}", n.percent_used_mem()),
-            gpu_alloc,
-            gpu_avail,
-            gpu_total,
-            gpu_pct,
-            n.state.clone(),
-        ]);
+        ];
+        if show_gpu {
+            let (gpu_alloc, gpu_avail, gpu_total, gpu_pct) = if n.has_gpus {
+                let avail = if raw {
+                    n.avail_gpus()
+                } else {
+                    n.effective_avail_gpus()
+                };
+                (
+                    n.alloc_gpus.to_string(),
+                    avail.to_string(),
+                    n.total_gpus.to_string(),
+                    format!("{:.2}", n.percent_used_gpu()),
+                )
+            } else {
+                ("N/A".into(), "N/A".into(), "N/A".into(), "N/A".into())
+            };
+            row.extend([gpu_alloc, gpu_avail, gpu_total, gpu_pct]);
+        }
+        row.push(n.state.clone());
+
+        table.add_row(row);
     }
 
     // Pre-compute owned color metadata for the 'static closure
@@ -475,8 +528,8 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
     table.set_cell_color(move |row_idx, col_idx, padded| {
         let (ref state, unavailable, bottleneck) = node_color_info[row_idx];
 
-        // NodeState column (14): color by state flags
-        if col_idx == 14 {
+        // NodeState column: color by state flags
+        if col_idx == col_state {
             if unavailable {
                 if state
                     .split('+')
@@ -492,9 +545,10 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
             return padded.to_string();
         }
 
-        // Avail columns (2=AvailCPU, 7=AvailMem, 11=AvailGPU):
-        // red if bottleneck (all effective=0) on a normally-available node
-        if bottleneck && matches!(col_idx, 2 | 7 | 11) {
+        // Avail columns: red when unavailable or bottleneck
+        let is_avail_col =
+            col_idx == col_avail_cpu || col_idx == col_avail_mem || col_avail_gpu == Some(col_idx);
+        if !raw && (unavailable || bottleneck) && is_avail_col {
             return color_error(padded).to_string();
         }
 
@@ -539,46 +593,7 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
         0.0
     };
 
-    let total_alloc_gpus: u64 = nodes.iter().map(|n| n.alloc_gpus).sum();
-    let total_avail_gpus: u64 = nodes
-        .iter()
-        .map(|n| {
-            if raw {
-                n.avail_gpus()
-            } else {
-                n.effective_avail_gpus()
-            }
-        })
-        .sum();
-    let total_gpus_sum: u64 = nodes.iter().map(|n| n.total_gpus).sum();
-    let pct_gpu = if total_gpus_sum > 0 {
-        (total_alloc_gpus as f64 / total_gpus_sum as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let gpu_alloc_total = if any_gpus {
-        total_alloc_gpus.to_string()
-    } else {
-        "N/A".into()
-    };
-    let gpu_avail_total = if any_gpus {
-        total_avail_gpus.to_string()
-    } else {
-        "N/A".into()
-    };
-    let gpu_total_total = if any_gpus {
-        total_gpus_sum.to_string()
-    } else {
-        "N/A".into()
-    };
-    let gpu_pct_total = if any_gpus {
-        format!("{:.2}", pct_gpu)
-    } else {
-        "N/A".into()
-    };
-
-    table.set_totals(vec![
+    let mut totals = vec![
         node_count.to_string(),
         total_alloc_cpus.to_string(),
         total_avail_cpus.to_string(),
@@ -589,12 +604,36 @@ fn print_table(nodes: &[NodeInfo], any_gpus: bool, raw: bool) {
         format_memory(total_avail_mem),
         format_memory(total_mem),
         format!("{:.2}", pct_mem),
-        gpu_alloc_total,
-        gpu_avail_total,
-        gpu_total_total,
-        gpu_pct_total,
-        String::new(),
-    ]);
+    ];
+
+    if show_gpu {
+        let total_alloc_gpus: u64 = nodes.iter().map(|n| n.alloc_gpus).sum();
+        let total_avail_gpus: u64 = nodes
+            .iter()
+            .map(|n| {
+                if raw {
+                    n.avail_gpus()
+                } else {
+                    n.effective_avail_gpus()
+                }
+            })
+            .sum();
+        let total_gpus_sum: u64 = nodes.iter().map(|n| n.total_gpus).sum();
+        let pct_gpu = if total_gpus_sum > 0 {
+            (total_alloc_gpus as f64 / total_gpus_sum as f64) * 100.0
+        } else {
+            0.0
+        };
+        totals.extend([
+            total_alloc_gpus.to_string(),
+            total_avail_gpus.to_string(),
+            total_gpus_sum.to_string(),
+            format!("{:.2}", pct_gpu),
+        ]);
+    }
+    totals.push(String::new());
+
+    table.set_totals(totals);
 
     print!("{table}");
 }
@@ -603,7 +642,7 @@ fn print_json(
     cluster: &ClusterEnv,
     args: &Args,
     nodes: &[NodeInfo],
-    any_gpus: bool,
+    show_gpu: bool,
     raw: bool,
 ) -> Result<()> {
     let json_nodes: Vec<serde_json::Value> = nodes
@@ -632,21 +671,23 @@ fn print_json(
                 "percent_used_mem": round2(n.percent_used_mem()),
                 "state": n.state,
             });
-            if n.has_gpus {
-                let avail_gpu = if raw {
-                    n.avail_gpus()
+            if show_gpu {
+                if n.has_gpus {
+                    let avail_gpu = if raw {
+                        n.avail_gpus()
+                    } else {
+                        n.effective_avail_gpus()
+                    };
+                    obj["alloc_gpus"] = serde_json::json!(n.alloc_gpus);
+                    obj["avail_gpus"] = serde_json::json!(avail_gpu);
+                    obj["total_gpus"] = serde_json::json!(n.total_gpus);
+                    obj["percent_used_gpu"] = serde_json::json!(round2(n.percent_used_gpu()));
                 } else {
-                    n.effective_avail_gpus()
-                };
-                obj["alloc_gpus"] = serde_json::json!(n.alloc_gpus);
-                obj["avail_gpus"] = serde_json::json!(avail_gpu);
-                obj["total_gpus"] = serde_json::json!(n.total_gpus);
-                obj["percent_used_gpu"] = serde_json::json!(round2(n.percent_used_gpu()));
-            } else {
-                obj["alloc_gpus"] = serde_json::Value::Null;
-                obj["avail_gpus"] = serde_json::Value::Null;
-                obj["total_gpus"] = serde_json::Value::Null;
-                obj["percent_used_gpu"] = serde_json::Value::Null;
+                    obj["alloc_gpus"] = serde_json::Value::Null;
+                    obj["avail_gpus"] = serde_json::Value::Null;
+                    obj["total_gpus"] = serde_json::Value::Null;
+                    obj["percent_used_gpu"] = serde_json::Value::Null;
+                }
             }
             obj
         })
@@ -691,24 +732,6 @@ fn print_json(
         0.0
     };
 
-    let total_alloc_gpus: u64 = nodes.iter().map(|n| n.alloc_gpus).sum();
-    let total_avail_gpus: u64 = nodes
-        .iter()
-        .map(|n| {
-            if raw {
-                n.avail_gpus()
-            } else {
-                n.effective_avail_gpus()
-            }
-        })
-        .sum();
-    let total_gpus_sum: u64 = nodes.iter().map(|n| n.total_gpus).sum();
-    let pct_gpu = if total_gpus_sum > 0 {
-        (total_alloc_gpus as f64 / total_gpus_sum as f64) * 100.0
-    } else {
-        0.0
-    };
-
     let mut totals = serde_json::json!({
         "node_count": node_count,
         "alloc_cpus": total_alloc_cpus,
@@ -722,7 +745,24 @@ fn print_json(
         "percent_used_mem": round2(pct_mem),
     });
 
-    if any_gpus {
+    if show_gpu {
+        let total_alloc_gpus: u64 = nodes.iter().map(|n| n.alloc_gpus).sum();
+        let total_avail_gpus: u64 = nodes
+            .iter()
+            .map(|n| {
+                if raw {
+                    n.avail_gpus()
+                } else {
+                    n.effective_avail_gpus()
+                }
+            })
+            .sum();
+        let total_gpus_sum: u64 = nodes.iter().map(|n| n.total_gpus).sum();
+        let pct_gpu = if total_gpus_sum > 0 {
+            (total_alloc_gpus as f64 / total_gpus_sum as f64) * 100.0
+        } else {
+            0.0
+        };
         totals["alloc_gpus"] = serde_json::json!(total_alloc_gpus);
         totals["avail_gpus"] = serde_json::json!(total_avail_gpus);
         totals["total_gpus"] = serde_json::json!(total_gpus_sum);
@@ -745,6 +785,85 @@ fn print_json(
 /// Round to 2 decimal places.
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+/// Assign a sort tier to a node state string.
+///
+/// 1 = IDLE (green), 2 = normal (MIXED/ALLOCATED/COMPLETING),
+/// 3 = warning (DRAIN/MAINTENANCE/RESERVED/FUTURE/POWER*),
+/// 4 = error (DOWN/NOT_RESPONDING/INVALID_REG).
+fn state_tier(state: &str) -> u8 {
+    let flags: Vec<&str> = state.split('+').collect();
+    if flags
+        .iter()
+        .any(|&f| f == "DOWN" || f == "NOT_RESPONDING" || f == "INVALID_REG")
+    {
+        return 4;
+    }
+    if flags.iter().any(|&f| {
+        matches!(
+            f,
+            "DRAIN"
+                | "MAINTENANCE"
+                | "RESERVED"
+                | "FUTURE"
+                | "POWER_DOWN"
+                | "POWERED_DOWN"
+                | "REBOOT_REQUESTED"
+                | "REBOOT_ISSUED"
+        )
+    }) {
+        return 3;
+    }
+    if flags.contains(&"IDLE") && flags.len() == 1 {
+        return 1;
+    }
+    2
+}
+
+/// Filter nodes by name pattern. Supports prefix matching and simple glob
+/// with `*` wildcard.
+fn filter_nodes_by_name(nodes: Vec<NodeInfo>, pattern: &str) -> Vec<NodeInfo> {
+    if pattern.contains('*') {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        nodes
+            .into_iter()
+            .filter(|n| glob_match(&n.name, &parts))
+            .collect()
+    } else {
+        nodes
+            .into_iter()
+            .filter(|n| n.name.starts_with(pattern))
+            .collect()
+    }
+}
+
+/// Simple glob matching: pattern split on `*` yields prefix/infix/suffix parts
+/// that must appear in order.
+fn glob_match(s: &str, parts: &[&str]) -> bool {
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !s.starts_with(part) {
+                return false;
+            }
+            pos = part.len();
+        } else if let Some(found) = s[pos..].find(part) {
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+    // If pattern doesn't end with *, the last part must be at the end
+    if let Some(last) = parts.last() {
+        if !last.is_empty() {
+            return s.ends_with(last);
+        }
+    }
+    true
 }
 
 /// Check if a node's state flags indicate it cannot accept new jobs.
@@ -1198,5 +1317,95 @@ NodeName=gl1000 CPUAlloc=9 CPUTot=40 CPULoad=0.82 AllocMem=81920 RealMemory=1843
         assert_eq!(nodes[1].name, "gl1000");
         assert!(nodes[1].has_gpus);
         assert_eq!(nodes[1].alloc_gpus, 2);
+    }
+
+    #[test]
+    fn state_tier_idle() {
+        assert_eq!(state_tier("IDLE"), 1);
+    }
+
+    #[test]
+    fn state_tier_normal_states() {
+        assert_eq!(state_tier("MIXED"), 2);
+        assert_eq!(state_tier("ALLOCATED"), 2);
+        assert_eq!(state_tier("COMPLETING"), 2);
+        assert_eq!(state_tier("MIXED+PLANNED"), 2);
+        assert_eq!(state_tier("IDLE+PLANNED"), 2);
+    }
+
+    #[test]
+    fn state_tier_warning_states() {
+        assert_eq!(state_tier("MIXED+DRAIN"), 3);
+        assert_eq!(state_tier("IDLE+MAINTENANCE+RESERVED"), 3);
+        assert_eq!(state_tier("ALLOCATED+DRAIN"), 3);
+        assert_eq!(state_tier("FUTURE"), 3);
+        assert_eq!(state_tier("POWER_DOWN"), 3);
+    }
+
+    #[test]
+    fn state_tier_error_states() {
+        assert_eq!(state_tier("DOWN+NOT_RESPONDING"), 4);
+        assert_eq!(state_tier("DOWN+MAINTENANCE+RESERVED+NOT_RESPONDING"), 4);
+        assert_eq!(state_tier("DOWN+INVALID_REG"), 4);
+    }
+
+    #[test]
+    fn filter_nodes_by_name_prefix() {
+        let nodes = vec![
+            make_test_node("gl3009", "MIXED"),
+            make_test_node("gl1000", "IDLE"),
+            make_test_node("armis20108", "IDLE"),
+        ];
+        let filtered = filter_nodes_by_name(nodes, "gl");
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "gl3009");
+        assert_eq!(filtered[1].name, "gl1000");
+    }
+
+    #[test]
+    fn filter_nodes_by_name_glob() {
+        let nodes = vec![
+            make_test_node("gl3009", "MIXED"),
+            make_test_node("gl3010", "IDLE"),
+            make_test_node("gl1000", "ALLOCATED"),
+        ];
+        let filtered = filter_nodes_by_name(nodes, "gl30*");
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "gl3009");
+        assert_eq!(filtered[1].name, "gl3010");
+    }
+
+    #[test]
+    fn filter_nodes_by_name_exact() {
+        let nodes = vec![
+            make_test_node("gl3009", "MIXED"),
+            make_test_node("gl3010", "IDLE"),
+        ];
+        let filtered = filter_nodes_by_name(nodes, "gl3009");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "gl3009");
+    }
+
+    #[test]
+    fn glob_match_patterns() {
+        assert!(glob_match("gl3009", &["gl30", ""]));
+        assert!(glob_match("gl3009", &["gl", "09"]));
+        assert!(!glob_match("gl1000", &["gl30", ""]));
+        assert!(glob_match("armis20108", &["armis", ""]));
+    }
+
+    fn make_test_node(name: &str, state: &str) -> NodeInfo {
+        NodeInfo {
+            name: name.into(),
+            alloc_cpus: 0,
+            total_cpus: 36,
+            cpu_load: 0.0,
+            alloc_mem_bytes: 0,
+            total_mem_bytes: 180 * (1 << 30),
+            alloc_gpus: 0,
+            total_gpus: 0,
+            has_gpus: false,
+            state: state.into(),
+        }
     }
 }
